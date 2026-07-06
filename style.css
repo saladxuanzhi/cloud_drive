@@ -1,0 +1,1145 @@
+:root {
+    --primary: #1a73e8;
+    --surface: #f8fafd;
+    --text-main: #1f1f1f;
+    --text-muted: #444746;
+    --border: #e0e0e0;
+    --hover-bg: #e8f0fe;
+    --sidebar-w: 256px;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: var(--dt-title-small-font, 500 .875rem / 1.25rem "Google Sans"), Google Sans, Roboto, Arial, sans-serif;
+}
+
+body {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+    background-color: var(--surface);
+    color: var(--text-main);
+}
+
+/* 侧边栏 */
+.sidebar {
+    width: var(--sidebar-w);
+    min-width: var(--sidebar-w);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    flex-shrink: 0;
+    /* 文字不可拖选：避免误选造成视觉噪点；输入框/可编辑元素不受影响 */
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* 侧边栏分隔线：默认透明，可拖动调整 sidebar 宽度。
+   中心 1px 在 hover/拖动时显示成主题色，平时完全透明。 */
+.sidebar-resizer {
+    width: 8px;
+    background: transparent;
+    cursor: col-resize;
+    flex-shrink: 0;
+    position: relative;
+    align-self: stretch;
+    /* 让中心 1px 仍然可以成为视觉上的"线"，平时透明 */
+}
+
+.sidebar-resizer::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    transform: translateX(-50%);
+    background: transparent;
+    transition: background-color 0.15s ease;
+}
+
+.sidebar-resizer:hover::before,
+.sidebar-resizer.dragging::before,
+body.resizing .sidebar-resizer::before {
+    background: var(--primary);
+}
+
+/* 拖动过程中：禁止文本选中、光标统一、屏蔽 hover 抖动 */
+body.resizing {
+    cursor: col-resize !important;
+    user-select: none;
+}
+
+.new-btn {
+    background: #fff;
+    border: 1px solid var(--border);
+    padding: 12px 24px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    box-shadow: 0 1px 2px 0 rgba(60,64,67,0.3);
+    max-width: max-content;
+    margin-bottom: 24px;
+    position: relative; /* 下拉菜单锚点 */
+}
+
+.new-btn:hover {
+    background: var(--hover-bg);
+}
+
+/* ================= 新建按钮下拉菜单 ================= */
+.new-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    min-width: 200px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12), 0 1px 3px rgba(0,0,0,0.06);
+    z-index: 200;
+    display: none;
+    overflow: hidden;
+    padding: 4px 0;
+}
+
+.new-menu.open {
+    display: block;
+}
+
+.new-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-main);
+    user-select: none;
+    transition: background-color 0.12s ease;
+}
+
+.new-menu-item:hover {
+    background: var(--hover-bg);
+}
+
+.new-menu-item i {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.new-menu-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 8px;
+}
+
+.nav-item {
+    height: 32px;
+    padding: 8px 16px;
+    border-radius: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 4px;
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+.nav-item:hover {
+    background: #e0e4e9;
+}
+
+.nav-item.active {
+    background: #c2e7ff;
+    color: #001d35;
+}
+
+.storage-info {
+    margin-top: auto;
+    padding: 16px 0;
+    border-top: 1px solid var(--border);
+    font-size: 14px;
+    color: var(--text-muted);
+}
+
+.progress-bar {
+    height: 4px;
+    background: #e0e0e0;
+    border-radius: 2px;
+    margin: 8px 0;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--primary);
+    width: 0%;
+    transition: width 0.3s;
+}
+
+/* 主容器 */
+.main-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    margin: 16px 16px 16px 0;
+    border-radius: 16px;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+.top-bar {
+    padding: 16px 24px;
+    margin-bottom: 0px;
+    /* 用 min-height 而非 height：保留 linter 的"至少 40px"意图，
+       但允许容器在 path-box 40px + padding 32px = 72px 实际需要时自动撑高 */
+    min-height: 40px;
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    /* selection-bar 用绝对定位覆盖在 top-bar 上，因此这里需要作为定位锚点 */
+    position: relative;
+    transition: opacity 0.18s ease;
+}
+
+/* 选中状态下，top-bar 的内容（路径/搜索/大头针）渐隐，让位给 selection-bar */
+.top-bar > .explorer-toolbar {
+    transition: opacity 0.18s ease;
+}
+
+body.has-selection .top-bar > .explorer-toolbar {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* ================= 仿 Windows 资源管理器工具栏 ================= */
+/* 路径 + 大头针 + 搜索 三块同一行排列，圆角胶囊风格贴合页面整体风格。 */
+.explorer-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+}
+
+/* 路径框：占满剩余空间，胶囊圆角，柔和的悬停反馈 */
+.path-box {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    height: 40px;
+    border: 1px solid transparent;
+    border-radius: 20px;
+    background: var(--surface);
+    padding: 0 16px;
+    cursor: text;
+    transition: background-color 0.18s ease, border-color 0.18s ease,
+                box-shadow 0.18s ease;
+    overflow: hidden;
+}
+
+/* 编辑模式：主题色淡蓝填充 + 主色边框 */
+.path-box.is-editing {
+    background: #ffffff;
+    border-color: var(--primary);
+    box-shadow: 0 1px 4px rgba(26, 115, 232, 0.15);
+}
+
+.path-box:not(.is-editing):hover {
+    background: #eef3fc;
+}
+
+/* 面包屑：紧凑、与输入框同样字号 */
+.breadcrumb {
+    font-size: 14px;
+    font-weight: 400;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-muted);
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.breadcrumb span {
+    cursor: pointer;
+    padding: 3px 8px;
+    border-radius: 12px;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.breadcrumb span:hover {
+    background: var(--hover-bg);
+    color: var(--primary);
+    text-decoration: none;
+}
+
+.breadcrumb .separator {
+    color: #b0b4ba;
+    font-size: 12px;
+    cursor: default;
+    padding: 2px 2px;
+    user-select: none;
+}
+
+.breadcrumb .separator:hover {
+    background: transparent;
+    color: #b0b4ba;
+}
+
+/* 编辑模式下的真实路径输入框 */
+.path-input {
+    width: 100%;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 14px;
+    color: var(--text-main);
+    padding: 0;
+    font-family: inherit;
+}
+
+/* 搜索框：胶囊圆角，固定 260px 宽度放右侧 */
+.search-box {
+    width: 260px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    height: 40px;
+    border: 1px solid transparent;
+    border-radius: 20px;
+    background: var(--surface);
+    padding: 0 16px;
+    transition: background-color 0.18s ease, border-color 0.18s ease,
+                box-shadow 0.18s ease;
+}
+
+.search-box:hover {
+    background: #eef3fc;
+}
+
+.search-box:focus-within {
+    background: #ffffff;
+    border-color: var(--primary);
+    box-shadow: 0 1px 4px rgba(26, 115, 232, 0.15);
+}
+
+.search-box input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    outline: none;
+    font-size: 14px;
+    color: var(--text-main);
+    min-width: 0;
+}
+
+.search-box input::placeholder {
+    color: #9aa0a6;
+}
+
+.search-box svg {
+    flex-shrink: 0;
+    cursor: pointer;
+    margin-left: 8px;
+    color: var(--text-muted);
+    transition: color 0.15s ease;
+}
+
+.search-box:focus-within svg {
+    color: var(--primary);
+}
+
+/* 多选操作栏：覆盖在 top-bar 之上，与 path-box 同一位置 / 同一高度，激活时渐显。
+   top: 16px 对应 top-bar 的 padding-top；height: 40px 对应 path-box 的高度。
+   配合 body.has-selection .top-bar > .explorer-toolbar 渐隐，形成淡入淡出效果。 */
+.selection-bar {
+    position: absolute;
+    top: 16px;
+    left: 24px;
+    right: 24px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px 0 8px;
+    background-color: #f0f4f9;
+    border-radius: 20px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease;
+    z-index: 50;
+}
+
+.selection-bar.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* 左边容器 */
+.sel-left {
+    display: flex;
+    align-items: center;
+}
+
+/* 选中文本 */
+.sel-text {
+    color: #1f1f1f;
+    font-size: 14px;
+    font-weight: 500;
+    margin-left: 8px;
+    margin-right: 16px; /* 与后面的操作图标保持合适的间距 */
+}
+
+/* 将所有操作按钮紧贴左侧文本，不再向右浮动 */
+.sel-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px; /* 官方操作图标间距比较紧凑 */
+}
+
+.sel-icon-btn {
+    background: transparent;
+    line-height: 0;
+    border: none;
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #444746; /* 设置为 currentColor 供内部 SVG 继承 */
+    transition: background-color 0.2s ease;
+    outline: none;
+}
+
+.sel-icon-btn:hover, 
+.sel-icon-btn:focus {
+    background-color: rgba(68, 71, 70, 0.08);
+}
+
+.sel-icon-btn i {
+    display: flex;
+}
+
+/* 文件列表表格 */
+.file-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 24px;
+    /* 文件列表文字不可拖选：选中效果已通过 .selected 行高亮呈现 */
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.file-table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+}
+
+.file-table th {
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 14px;
+    padding: 12px 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* ================= 列排序 ================= */
+/* 可点击排序的列头：hover 高亮；active 列文字颜色加深 */
+.sort-th {
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.15s ease;
+}
+
+.sort-th:hover {
+    color: var(--primary);
+}
+
+.sort-th.active {
+    color: var(--text-main);
+}
+
+/* 列头内层：横向 flex，让箭头紧贴文字右侧 */
+.sort-th-inner {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* 排序箭头圆形徽章：rgb(194, 231, 255) 背景，rgb(0, 74, 119) 图标 */
+.sort-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgb(194, 231, 255);
+    flex-shrink: 0;
+    line-height: 0;
+}
+
+.sort-arrow svg {
+    width: 18px;
+    height: 18px;
+    fill: rgb(0, 74, 119);
+    display: block;
+}
+
+/* 未激活列也保留占位，避免排序时列宽跳动 */
+.sort-arrow-placeholder {
+    display: inline-flex;
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+}
+
+.file-table td {
+    padding: 12px 8px;
+    font-size: 14px;
+    border-bottom: 1px solid #f0f0f0;
+    cursor: default;
+}
+
+.file-table tr:hover {
+    background: #f5f5f5;
+}
+
+.file-table tr.selected {
+    background: #e8f0fe !important;
+}
+
+.file-name-cell {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* 拖拽上传遮罩层 */
+.drop-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(255,255,255,0.85);
+    border: 2px dashed var(--primary);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    flex-direction: column;
+    border-radius: 16px;
+    pointer-events: none;
+}
+
+.drop-overlay.active {
+    display: flex;
+}
+
+.drop-overlay h2 {
+    color: var(--primary);
+    font-size: 24px;
+    pointer-events: none;
+}
+
+/* 右下角上传状态窗口 (图2 规范风格) */
+.upload-widget {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    width: 360px;
+    background: #fff;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    border-radius: 8px;
+    z-index: 1000;
+    display: none;
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+.uw-header {
+    background: #ffffff;
+    color: #202124;
+    padding: 14px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 15px;
+    font-weight: 500;
+    border-bottom: 1px solid #dadce0;
+}
+
+.uw-header-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+.uw-ctrl-btn {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    padding: 4px;
+    color: #5f6368;
+}
+
+.uw-ctrl-btn:hover {
+    background: #f1f3f4;
+}
+
+.uw-subbar {
+    background: #e8f0fe;
+    color: #1a73e8;
+    font-size: 12px;
+    padding: 8px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.uw-subbar span.cancel {
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.uw-list {
+    max-height: 240px;
+    overflow-y: auto;
+    transition: max-height 0.2s ease-out;
+}
+
+.uw-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.uw-item-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    color: #333;
+}
+
+/* 折叠逻辑样式 */
+.upload-widget.collapsed .uw-subbar,
+.upload-widget.collapsed .uw-list {
+    display: none !important;
+}
+
+/* 圆形进度环 */
+.circular-progress {
+    width: 24px;
+    height: 24px;
+    transform: rotate(-90deg);
+}
+
+.circular-progress circle {
+    fill: none;
+    stroke-width: 3;
+}
+
+.circular-progress .bg {
+    stroke: #e6e6e6;
+}
+
+.circular-progress .value {
+    stroke: var(--primary);
+    stroke-dasharray: 63;
+    stroke-dashoffset: 63;
+    transition: stroke-dashoffset 0.1s linear;
+}
+
+.svg-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.action-btn {
+    cursor: pointer;
+    width: 36px;
+    height: 36px;
+    padding: 4px;
+    line-height: 0;
+    border: none;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    outline: none;
+    opacity: 0;
+    background: transparent;
+    transition: background-color 0.2s ease;
+    transition: opacity 0.2s;
+}
+
+.file-table tr:hover .action-btn {
+    opacity: 1;
+}
+
+.action-btn:hover {
+    background-color: rgba(68, 71, 70, 0.08);
+}
+
+/* ================= 侧边栏导航：双图标切换（normal + active 同位叠加） ================= */
+.nav-item {
+    transition: background-color 0.15s ease;
+}
+
+.nav-item i,
+.nav-item svg {
+    flex-shrink: 0;
+}
+
+.nav-icon-stack {
+    position: relative;
+    display: inline-flex;
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+}
+
+.nav-icon-stack svg {
+    width: 24px;
+    height: 24px;
+}
+
+.nav-icon-stack > .nav-icon-normal,
+.nav-icon-stack > .nav-icon-active {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.3s ease; /* 添加透明度过渡动画 */
+}
+
+.nav-icon-stack > .nav-icon-active {
+    opacity: 0;
+}
+
+.nav-item.active .nav-icon-stack > .nav-icon-normal {
+    opacity: 0;
+}
+.nav-item.active .nav-icon-stack > .nav-icon-active {
+    opacity: 1;
+}
+
+.pin-tilted svg {
+    transform: rotate(45deg);
+    transition: transform 0.2s ease;
+}
+
+.nav-item.active .pin-tilted svg {
+    transform: rotate(0deg);
+}
+
+/* ================= 侧边栏：左侧 expander ================= */
+/* 所有 nav-item 左侧都有一个等宽占位；只有 navPinned 渲染可见三角 logo。
+   通过占位统一其它 nav-item 的左缩进，避免文字偏移。 */
+.nav-expander {
+    /* 消除expander自身大小的占位 */
+    margin-left: -16px; 
+    margin-right: -16px; 
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nav-expander svg {
+    width: 20px;
+    height: 20px;
+    /* 透明占位：不渲染任何 fill */
+    fill: transparent;
+    pointer-events: none;
+}
+
+.nav-expander-clickable {
+    cursor: pointer;
+}
+
+.nav-expander-clickable svg {
+    fill: currentColor;
+    opacity: 0.55;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.nav-expander-clickable:hover svg {
+    opacity: 0.85;
+}
+
+/* 展开时：▶ 旋转 90deg 变成 ▼ */
+.nav-expander-clickable.expanded svg {
+    transform: rotate(90deg);
+    opacity: 0.85;
+}
+
+/* ================= 固定路径（Pin） ================= */
+/* 大头针按钮：胶囊圆角、柔和悬停背景，与路径框/搜索框风格一致 */
+.bc-pin-btn {
+    border: 1px solid transparent;
+    background: var(--surface);
+    cursor: pointer;
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    transition: background-color 0.18s ease, color 0.18s ease,
+                box-shadow 0.18s ease;
+    flex-shrink: 0;
+}
+
+.bc-pin-btn:hover {
+    background: #eef3fc;
+    color: var(--primary);
+}
+
+.bc-pin-btn i,
+.bc-pin-btn svg {
+    /* 未固定：logo 45° 倾斜 */
+    transform: rotate(45deg);
+    transition: transform 0.2s ease, color 0.15s ease, fill 0.15s ease;
+}
+
+/* 固定时：垂直 + 主题色 + 淡蓝填充 */
+.bc-pin-btn.pinned {
+    background: var(--hover-bg);
+    color: var(--primary);
+}
+
+.bc-pin-btn.pinned i,
+.bc-pin-btn.pinned svg {
+    transform: rotate(0deg);
+    color: var(--primary);
+    fill: var(--primary);
+}
+
+/* ================= 侧边栏：已固定的文件夹下的扁平列表 ================= */
+/* padding-left 对齐到 navPinned 中 icon-stack 的位置：
+   sidebar padding(16) + nav-item padding-left(16) + nav-expander(20) + gap(12) = 64，
+   因此 pinned-list 自身 padding-left = 64 - sidebar padding(16) = 48。*/
+.pinned-list {
+    margin: 0 0 8px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-left: 48px;
+}
+
+.pinned-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 12px;
+    border-radius: 16px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 13px;
+    min-width: 0;
+}
+
+.pinned-item:hover {
+    background: #e0e4e9;
+}
+
+.pinned-item.current {
+    background: #c2e7ff;
+    color: #001d35;
+    font-weight: 500;
+}
+
+.pinned-item i,
+.pinned-item svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+
+.pinned-item-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pinned-empty {
+    padding: 4px 12px;
+    color: #999;
+    font-size: 12px;
+    font-style: italic;
+}
+
+/* ================= 通用弹窗 ================= */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(32, 33, 36, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 3000;
+    animation: modalFade 0.12s ease;
+}
+
+@keyframes modalFade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.modal {
+    background: #fff;
+    border-radius: 12px;
+    width: 460px;
+    max-width: calc(100vw - 48px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.24);
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 96px);
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px 8px 24px;
+}
+
+.modal-title {
+    font-size: 22px;
+    font-weight: 400;
+    color: var(--text-main);
+}
+
+.modal-close {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+}
+
+.modal-close:hover {
+    background: rgba(68, 71, 70, 0.08);
+}
+
+.modal-body {
+    padding: 12px 24px;
+    overflow-y: auto;
+}
+
+.modal-input {
+    width: 100%;
+    border: 1px solid #747775;
+    border-radius: 4px;
+    padding: 12px 14px;
+    font-size: 15px;
+    outline: none;
+    background: #fff;
+    color: var(--text-main);
+}
+
+.modal-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 1px var(--primary);
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 24px 20px 24px;
+}
+
+.modal-btn {
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 10px 24px;
+    border-radius: 20px;
+    transition: background-color 0.15s ease;
+}
+
+.modal-btn-text {
+    background: transparent;
+    color: var(--primary);
+}
+
+.modal-btn-text:hover {
+    background: var(--hover-bg);
+}
+
+.modal-btn-primary {
+    background: var(--primary);
+    color: #fff;
+}
+
+.modal-btn-primary:hover {
+    background: #1666c9;
+}
+
+.modal-btn-primary:disabled {
+    background: #c5c7c9;
+    cursor: not-allowed;
+}
+
+/* ================= 移动弹窗 ================= */
+.move-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.move-sub {
+    font-size: 14px;
+    color: var(--text-muted);
+}
+
+.move-pinned {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.move-pinned-label {
+    width: 100%;
+    font-size: 12px;
+    color: #888;
+}
+
+.move-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 12px;
+    border-radius: 16px;
+    background: #f0f4f9;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-main);
+    max-width: 160px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.move-chip:hover {
+    background: var(--hover-bg);
+}
+
+.move-chip i,
+.move-chip svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
+.move-breadcrumb {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    font-size: 14px;
+    color: var(--text-muted);
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.move-crumb {
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+.move-crumb:hover {
+    background: var(--hover-bg);
+    color: var(--primary);
+}
+
+.move-crumb-sep {
+    color: #aaa;
+}
+
+.move-folders {
+    min-height: 160px;
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.move-folder {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.move-folder:hover {
+    background: #f5f5f5;
+}
+
+.move-folder.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.move-folder i,
+.move-folder svg {
+    flex-shrink: 0;
+}
+
+.move-folder-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.move-empty {
+    text-align: center;
+    color: #aaa;
+    padding: 40px 0;
+    font-size: 14px;
+}

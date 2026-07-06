@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Private Cloud</title>
+    <!-- 引入外部 CSS 样式文件 -->
+    <link rel="stylesheet" href="style.css">
+    <!-- 引入 SparkMD5 插件 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
+</head>
+<body>
+
+    <!-- 侧边栏 -->
+    <div class="sidebar">
+        <div class="new-btn" id="newBtn" onclick="toggleNewMenu(event)">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 4v16m8-8H4" stroke="#444746" stroke-width="2" stroke-linecap="round"/></svg>
+            新建
+            <!-- 下拉菜单：新建文件夹 / 上传文件 / 上传文件夹 -->
+            <div class="new-menu" id="newMenu" role="menu">
+                <div class="new-menu-item" role="menuitem" onclick="event.stopPropagation(); handleNewFolder()">
+                    <svg height="24" width="24" viewBox="0 -960 960 960" focusable="false"><path d="M560-320h80v-80h80v-80H640v-80H560v80H480v80h80v80ZM160-160q-33,0-56.5-23.5T80-240V-720q0-33,23.5-56.5T160-800H400l80,80H800q33,0,56.5,23.5T880-640v400q0,33-23.5,56.5T800-160H160Zm0-80H800V-640H447l-80-80H160v480Zm0,0V-720v80v400Z"/></svg>
+                    <span>新建文件夹</span>
+                </div>
+                <div class="new-menu-divider" role="separator"></div>
+                <div class="new-menu-item" role="menuitem" onclick="event.stopPropagation(); handleUploadFile()">
+                    <svg height="24" width="24" viewBox="0 -960 960 960" focusable="false"><path d="M440-200h80V-367l64,64l56-57L480-520L320-360l57,56l63-63v167ZM240-80q-33,0-56.5-23.5T160-160V-800q0-33,23.5-56.5T240-880H560L800-640v480q0,33-23.5,56.5T720-80H240ZM520-600V-800H240v640H720V-600H520ZM240-800v200V-800v200v440V-800Z"/></svg>
+                    <span>上传文件</span>
+                </div>
+                <div class="new-menu-item" role="menuitem" onclick="event.stopPropagation(); handleUploadFolder()">
+                    <svg height="24" width="24" viewBox="0 -960 960 960" focusable="false"><path d="M440-280h80V-448l64,64l56-56L480-600L320-440l56,56l64-64v168ZM160-160q-33,0-56.5-23.5T80-240V-720q0-33,23.5-56.5T160-800H400l80,80H800q33,0,56.5,23.5T880-640v400q0,33-23.5,56.5T800-160H160Zm0-80H800V-640H447l-80-80H160v480Zm0,0V-720v80v400Z"/></svg>
+                    <span>上传文件夹</span>
+                </div>
+            </div>
+        </div>
+        <input type="file" id="fileInput" multiple style="display: none;" onchange="handleFileSelect(event)">
+        <input type="file" id="folderInput" webkitdirectory directory multiple style="display: none;" onchange="handleFolderSelect(event)">
+
+        <div class="nav-item active" id="navFiles" onclick="switchToFilesView()">
+            <span class="nav-expander"><svg width="20" height="20" viewBox="0 0 20 20" focusable="false"></svg></span>
+            <span class="nav-icon-stack">
+                <span class="nav-icon-normal"><svg width="24" height="24" viewBox="0 0 24 24" fill="#000000" focusable="false"><path d="M0,0h24v24H0V0z" fill="none"/><path d="M12 3L4 9v12h16V9l-8-6zm6 16h-3v-6H9v6H6v-9l6-4.5 6 4.5v9z"/></svg></span>
+                <span class="nav-icon-active"><svg width="24" height="24" viewBox="0 0 24 24" fill="#000000" focusable="false"><path d="M0,0h24v24H0V0z" fill="none"/><polygon points="12,3 4,9 4,21 10,21 10,14 14,14 14,21 20,21 20,9"/></svg></span>
+            </span>
+            主目录
+        </div>
+
+        <!-- 已固定的文件夹：与「主目录」同级，logo 倾斜大头针，点击展开/折叠下方的固定列表 -->
+        <div class="nav-item" id="navPinned" onclick="switchToPinnedView()">
+            <span class="nav-expander nav-expander-clickable" id="navPinnedExpander" onclick="event.stopPropagation(); togglePinnedSection()" title="展开/折叠">
+                <svg class="c-qd a-s-fa-Ha-pa" width="20" height="20" viewBox="0 0 20 20" focusable="false" fill="currentColor"><polygon points="8,5 13,10 8,15"></polygon></svg>
+            </span>
+            <span class="nav-icon-stack">
+                <span class="nav-icon-normal pin-tilted"><svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2zM14 4v8.1l1.5 1.5v.4h-7v-.4L10 12.1V4h4z"/></svg></span>
+                <span class="nav-icon-active pin-tilted"><svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg></span>
+            </span>
+            <span class="nav-pinned-label">已固定的文件夹</span>
+        </div>
+        <div class="pinned-list" id="pinnedList"></div>
+
+        <div class="nav-item" id="navTrash" onclick="switchToTrashView()">
+            <span class="nav-expander"><svg width="20" height="20" viewBox="0 0 20 20" focusable="false"></svg></span>
+            <span class="nav-icon-stack">
+                <span class="nav-icon-normal"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4h-5zm2 15H7V6h10v13zM9 8h2v9H9zm4 0h2v9h-2z"/></svg></span>
+                <span class="nav-icon-active"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4H15zM11 17H9V8h2v9zm4 0h-2V8h2v9z"/></svg></span>
+            </span>
+            回收站
+        </div>
+
+        <div class="storage-info">
+            <div style="display: flex; gap:8px; align-items: center; margin-bottom: 8px;">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="#444746"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM19 18H6c-2.21 0-4-1.79-4-4s1.79-4 4-4h.71C7.37 7.69 9.48 6 12 6c3.04 0 5.5 2.46 5.5 5.5v.5H19c1.66 0 3 1.34 3 3s-1.34 3-3 3z"/></svg>
+                存储空间
+            </div>
+            <div class="progress-bar"><div class="progress-fill" id="storageFill"></div></div>
+            <span id="storageText">计算中...</span>
+        </div>
+    </div>
+
+    <!-- 侧边栏拖拽把手：分隔线默认透明，可左右拖动调整 sidebar 宽度 -->
+    <div class="sidebar-resizer" id="sidebarResizer" role="separator" aria-orientation="vertical" aria-label="拖动调整侧边栏宽度"></div>
+
+    <!-- 主容器 -->
+    <div class="main-container" id="dropZone">
+        <!-- 拖拽上传覆盖物 -->
+        <div class="drop-overlay" id="dropOverlay">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="var(--primary)" style="margin-bottom: 16px;"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+            <h2>释放文件以开始上传</h2>
+        </div>
+
+        <!-- 顶部工具栏：路径 + 大头针 + 搜索 -->
+        <div class="top-bar">
+            <div class="explorer-toolbar">
+                <!-- 1. 路径显示与编辑区域：点击空白处进入编辑模式 -->
+                <div class="path-box" id="pathBox" onclick="enterPathEditMode()">
+                    <div class="breadcrumb" id="breadcrumb">
+                        <span onclick="event.stopPropagation(); loadPath('')">Home</span>
+                    </div>
+                    <input type="text" id="pathInput" class="path-input" autocomplete="off"
+                           onblur="exitPathEditMode()"
+                           onkeydown="handlePathKeydown(event)"
+                           style="display: none;">
+                </div>
+
+                <!-- 2. 大头针按钮（路径与搜索之间） -->
+                <button class="bc-pin-btn" id="bcPinBtn" onclick="togglePinCurrentPath()" title="固定当前位置" aria-label="固定当前位置">
+                    <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+                </button>
+
+                <!-- 3. 搜索框：放大镜在右侧 -->
+                <div class="search-box">
+                    <input type="text" id="searchInput" oninput="handleSearch()" placeholder="在当前目录中搜索...">
+                    <svg height="18" viewBox="0 0 24 24" width="18" fill="#444746"><path d="M20.49,19l-5.73-5.73C15.53,12.2,16,10.91,16,9.5C16,5.91,13.09,3,9.5,3S3,5.91,3,9.5C3,13.09,5.91,16,9.5,16 c1.41,0,2.7-0.47,3.77-1.24L19,20.49L20.49,19z M5,9.5C5,7.01,7.01,5,9.5,5S14,7.01,14,9.5S11.99,14,9.5,14S5,11.99,5,9.5z"/></svg>
+                </div>
+            </div>
+
+        <!-- 多选操作条：覆盖在 top-bar 之上，激活时 top-bar 渐隐、自身渐显 -->
+        <div class="selection-bar" id="selectionBar" aria-hidden="true">
+            <!-- 1. 清除选择 与 数量文本 -->
+            <div class="sel-left">
+                <button class="sel-icon-btn" onclick="clearSelection()" title="清除选择" aria-label="清除选择">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="#444746"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                </button>
+                <span class="sel-text" id="selectCount">已选择 0 项内容</span>
+            </div>
+
+            <!-- 2. 操作图标 (紧贴左侧文本) -->
+            <div class="sel-actions">
+                <button class="sel-icon-btn" id="selDownload" onclick="bulkDownload()" title="下载" aria-label="下载">
+                    <svg height="20" width="20" viewBox="0 96 960 960" fill="#444746"><path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"/></svg>
+                </button>
+                <button class="sel-icon-btn" id="selMove" onclick="bulkMove()" title="移动" aria-label="移动">
+                    <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10zm-8.01-9l-1.41 1.41L12.16 12H8v2h4.16l-1.59 1.59L11.99 17 16 13.01 11.99 9z"/></svg>
+                </button>
+                <button class="sel-icon-btn" id="selTrash" onclick="bulkTrash()" title="移除" aria-label="移除">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4h-5zm2 15H7V6h10v13zM9 8h2v9H9zm4 0h2v9h-2z"/></svg>
+                </button>
+                <button class="sel-icon-btn" id="selLink" onclick="copyLink()" title="复制链接" aria-label="复制链接">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3.9 12c0-1.7 1.4-3.1 3.1-3.1h4V7H7c-2.8 0-5 2.2-5 5s2.2 5 5 5h4v-1.9H7C5.3 15.1 3.9 13.7 3.9 12zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.7 0 3.1 1.4 3.1 3.1s-1.4 3.1-3.1 3.1h-4V17h4c2.8 0 5-2.2 5-5s-2.2-5-5-5z"/></svg>
+                </button>
+                <button class="sel-icon-btn" id="selRestore" onclick="bulkRestore()" title="还原" aria-label="还原">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="#444746"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                </button>
+                <button class="sel-icon-btn" id="selDeletePerm" onclick="bulkDeletePermanently()" title="永久删除" aria-label="永久删除">
+                    <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M9.4 16.5l2.6-2.6 2.6 2.6 1.4-1.4-2.6-2.6L16 9.9l-1.4-1.4-2.6 2.6-2.6-2.6L8 9.9l2.6 2.6L8 15.1ZM7 21q-.825 0-1.412-.587Q5 19.825 5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413Q17.825 21 17 21ZM17 6H7v13h10ZM7 6v13Z"/></svg>
+                </button>
+                <button class="sel-icon-btn" id="selMore" title="更多操作" aria-label="更多操作">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+                </button>
+            </div>
+        </div>
+        </div>
+
+        <div class="file-list">
+            <table class="file-table">
+                <thead id="tableHeader">
+                    <!-- JS动态表头 -->
+                </thead>
+                <tbody id="fileTableBody">
+                    <!-- JS动态载入文件 -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 右下角上传控件 -->
+    <div class="upload-widget" id="uploadWidget">
+        <div class="uw-header">
+            <span id="uwTitle">正在上传 0 项内容</span>
+            <div class="uw-header-controls">
+                <button class="uw-ctrl-btn" id="uwCollapseBtn" onclick="toggleUploadWidgetCollapse()" title="展开/折叠">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z"/></svg>
+                </button>
+                <button class="uw-ctrl-btn" onclick="closeUploadWidget()" title="关闭">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                </button>
+            </div>
+        </div>
+        <div class="uw-subbar" id="uwSubbar">
+            <span id="uwSpeed">准备中...</span>
+            <span class="cancel" onclick="cancelAllUploads()">取消</span>
+        </div>
+        <div class="uw-list" id="uwList">
+            <!-- 上传条目 -->
+        </div>
+    </div>
+
+    <!-- 动态从后端加载独立出的 JS 逻辑 -->
+    <script src="script.js"></script>
+</body>
+</html>
