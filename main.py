@@ -13,10 +13,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ================= 配置区 =================
+# 系统根目录：存放 .trash、.tmp、.pinned.json、trash_db.json 等网盘自身文件。
+# 用户在 UI 里看不到这些文件。
 CLOUD_DRIVE_ROOT = os.getenv("CLOUD_DRIVE_ROOT", "D:\\Drive")
-TRASH_DIR = os.path.join(CLOUD_DRIVE_ROOT, ".trash")
-TEMP_DIR = os.path.join(CLOUD_DRIVE_ROOT, ".tmp")
-PINNED_FILE = os.path.join(CLOUD_DRIVE_ROOT, ".pinned.json")
+# 用户可见的最上层目录。所有文件/目录操作都基于此目录解析相对路径。
+USER_ROOT = os.getenv("USER_ROOT", CLOUD_DRIVE_ROOT)
+
+# 网盘自身用的文件位置（与用户文件隔离，不出现在文件列表中）
+DRIVE_DATA_DIR = os.getenv("DRIVE_DATA_DIR", os.path.join(CLOUD_DRIVE_ROOT, ".system_data"))
+TRASH_DIR = os.path.join(DRIVE_DATA_DIR, ".trash")
+TEMP_DIR = os.path.join(DRIVE_DATA_DIR, ".tmp")
+PINNED_FILE = os.path.join(DRIVE_DATA_DIR, ".pinned.json")
 TRASH_DB_FILE = os.path.join(TRASH_DIR, "trash_db.json")
 ICONS_DIR = Path(__file__).parent / "icons"
 
@@ -26,10 +33,46 @@ COPY_LINK_TTL = 3600
 DIRECT_DOWNLOAD_TTL = 60
 # 文件夹下载大小限制（字节）：200 MB。超过限制不允许打包下载。
 FOLDER_DOWNLOAD_LIMIT = 200 * 1024 * 1024
+# 文本预览大小上限（字节）：2 MB。超过则返回 413。
+TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024
+# 图片预览大小上限（字节）：50 MB。超过则返回 413。
+IMAGE_PREVIEW_LIMIT = 50 * 1024 * 1024
+# 二进制检测窗口：读取文件首部 8KB 找 NUL 字节。
+BINARY_SNIFF_BYTES = 8 * 1024
+# 允许预览的图片扩展 → MIME。
+_IMAGE_MIME = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "png": "image/png",  "gif":  "image/gif",
+    "webp": "image/webp", "svg": "image/svg+xml",
+    "bmp": "image/bmp",  "ico":  "image/x-icon",
+}
+# 允许预览的文本/代码/配置扩展。lower-case 比较。
+_TEXT_EXTS = {
+    # 纯文本/笔记
+    "txt","md","markdown","log","rst",
+    # 代码
+    "js","jsx","ts","tsx","mjs","cjs",
+    "py","java","kt","scala","groovy",
+    "c","h","cpp","cc","cxx","hpp","hh",
+    "go","rs","swift","m","mm","rb","php",
+    "sh","bash","zsh","fish","ps1","bat","cmd",
+    "sql","lua","pl","r","dart","vue","svelte",
+    "css","scss","sass","less","html","htm","xml",
+    # 配置 / 数据
+    "json","yml","yaml","toml","ini","env","conf",
+    "properties","cfg","gradle","cmake",
+}
 
 # 初始化系统目录
-for d in [CLOUD_DRIVE_ROOT, TRASH_DIR, TEMP_DIR]:
+for d in [CLOUD_DRIVE_ROOT, USER_ROOT, TRASH_DIR, TEMP_DIR]:
     Path(d).mkdir(parents=True, exist_ok=True)
+# 校验 USER_ROOT 必须是 CLOUD_DRIVE_ROOT 自身或它的子目录
+_user_root_resolved = str(Path(USER_ROOT).resolve())
+_system_root_resolved = str(Path(CLOUD_DRIVE_ROOT).resolve())
+if not _user_root_resolved.startswith(_system_root_resolved):
+    raise RuntimeError(
+        f"USER_ROOT ({USER_ROOT}) 必须是 CLOUD_DRIVE_ROOT ({CLOUD_DRIVE_ROOT}) 的子目录或相同目录"
+    )
 if not os.path.exists(PINNED_FILE):
     with open(PINNED_FILE, 'w') as f: json.dump([], f)
 if not os.path.exists(TRASH_DB_FILE):
@@ -93,7 +136,8 @@ def get_icon(name: str):
 
 # ================= 核心安全验证方法 =================
 def get_safe_path(rel_path: str) -> Path:
-    base = Path(CLOUD_DRIVE_ROOT).resolve()
+    # 文件操作都基于用户可见根目录解析，限制在 USER_ROOT 内防越界
+    base = Path(USER_ROOT).resolve()
     rel_path = rel_path.lstrip('/') if rel_path else ""
     target = (base / rel_path).resolve()
 
@@ -161,7 +205,7 @@ def _zip_folder_to(src_dir: Path, zip_path: Path) -> None:
 # ================= 基础/单项操作 API =================
 @app.get("/api/storage")
 def get_storage():
-    total, used, free = shutil.disk_usage(CLOUD_DRIVE_ROOT)
+    total, used, free = shutil.disk_usage(USER_ROOT)
     return {"total": total, "used": used, "free": free}
 
 @app.get("/api/files")
@@ -574,6 +618,69 @@ def download_file(ticket: str, background: BackgroundTasks):
     if not target.exists() or target.is_dir():
         raise HTTPException(404, "File not found")
     return FileResponse(target, filename=target.name)
+
+# ================= 预览 API =================
+@app.get("/api/preview")
+def preview_file(path: str = "", kind: str = "image"):
+    """
+    读取并返回单文件内容用于前端预览。
+    - kind=image: 流式返回图像字节（FileResponse），设置正确的 Content-Type。
+    - kind=text : 返回 JSON { content, size, truncated }。超过 2 MB → 413；含 NUL → 415。
+    """
+    if kind not in ("image", "text"):
+        raise HTTPException(400, "kind 必须为 image 或 text")
+
+    target = get_safe_path(path)
+    if not target.exists():
+        raise HTTPException(404, "文件不存在")
+    if not target.is_file():
+        raise HTTPException(400, "只能预览文件，不能预览目录或特殊项")
+    if target.is_symlink():
+        raise HTTPException(400, "不支持预览符号链接")
+
+    ext = target.suffix.lstrip(".").lower()
+    size = target.stat().st_size
+
+    if kind == "image":
+        if ext not in _IMAGE_MIME:
+            raise HTTPException(400, f"不支持的图片格式：{ext or '(无扩展名)'}")
+        if size > IMAGE_PREVIEW_LIMIT:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": f"图片过大（>{IMAGE_PREVIEW_LIMIT // 1024 // 1024}MB），无法预览",
+                    "size": size,
+                },
+            )
+        return FileResponse(target, media_type=_IMAGE_MIME[ext])
+
+    # kind == "text"
+    if ext and ext not in _TEXT_EXTS:
+        raise HTTPException(415, f"不支持的文本格式：{ext}")
+    if size > TEXT_PREVIEW_LIMIT:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": f"文件过大（>{TEXT_PREVIEW_LIMIT // 1024 // 1024}MB），仅支持预览 2MB 以内的文本",
+                "size": size,
+                "limit": TEXT_PREVIEW_LIMIT,
+            },
+        )
+
+    try:
+        with open(target, "rb") as f:
+            head = f.read(BINARY_SNIFF_BYTES)
+            rest = f.read()
+    except PermissionError:
+        raise HTTPException(403, "权限不足")
+    except OSError as e:
+        raise HTTPException(500, f"读取失败：{e}")
+
+    if b"\x00" in head:
+        return JSONResponse(status_code=415, content={"error": "binary", "size": size})
+
+    text = (head + rest).decode("utf-8", errors="replace")
+    return {"content": text, "size": size, "truncated": False}
 
 # ================= 上传 API =================
 @app.post("/api/upload")

@@ -97,6 +97,9 @@ let currentItemsList = [];
 let selectedItems = [];
 let lastSelectedIndex = -1; // shift+click 的锚点；普通点击/Ctrl 加入时更新
 let currentXHRs = {};
+// 当前正在飞行的 /api/files 请求，用于快速切换目录时取消上一次请求，
+// 避免旧响应覆盖新内容（例如点 pinned 后立刻点主目录时）。
+let currentListController = null;
 let pinnedPaths = []; // 已固定的目录相对路径列表
 // 排序状态：sortField=name|modified|size，sortDirection=asc|desc
 let sortField = "name";
@@ -162,17 +165,31 @@ window.addEventListener("DOMContentLoaded", () => {
     updateStorage();
     loadPinned();
     switchToFilesView();
+    loadPath("");
 });
 
 function switchToFilesView() {
     currentView = "files";
-    currentPath = "";
-    document.getElementById("navFiles").classList.add("active");
+    // 不重置 currentPath、不调用 loadPath，由调用方决定目标路径并显式 loadPath，
+    // 避免与调用方随后 loadPath(其他路径) 形成 fetch 竞争，
+    // 导致面包屑与表格内容不一致。
+    // 主目录仅在路径为 Home (currentPath === "") 时高亮，进入子目录后取消激活。
+    document.getElementById("navFiles").classList.toggle("active", currentPath === "");
     document.getElementById("navPinned").classList.remove("active");
     document.getElementById("navTrash").classList.remove("active");
     document.getElementById("bcPinBtn").style.display = "";
     clearSelection();
-    loadPath("");
+}
+
+// 侧边栏「主目录」点击：切到 files 视图并回到 Home。
+// 当处于 files 视图且已在 Home 时跳过 loadPath 避免无谓请求；
+// 处于 pinned/trash 等非 files 视图或子目录时，强制 loadPath("") 刷新表格内容。
+function navFilesClick() {
+    const wasNonFilesView = currentView !== "files";
+    switchToFilesView();
+    if (wasNonFilesView || currentPath !== "") {
+        loadPath("");
+    }
 }
 
 function switchToPinnedView() {
@@ -216,18 +233,31 @@ function syncPinnedExpander() {
 }
 
 async function loadPath(path) {
+    // 取消上一次未完成的 /api/files 请求，避免快速切换目录（如点 pinned 后立刻点主目录）
+    // 时旧响应迟到覆盖新内容。
+    if (currentListController) {
+        currentListController.abort();
+    }
+    currentListController = new AbortController();
+
     currentPath = path;
     currentRawPath = path || "";
     updateBreadcrumb();
     updatePinButton();
     clearSelection();
     try {
-        const res = await fetch(`${CONFIG.API_BASE}/api/files?path=${encodeURIComponent(path)}`);
+        const res = await fetch(`${CONFIG.API_BASE}/api/files?path=${encodeURIComponent(path)}`, {
+            signal: currentListController.signal,
+        });
         const data = await res.json();
         currentItemsList = data.items;
         renderTableHeader();
         renderTableBody();
-    } catch (e) { alert("加载目录失败"); }
+    } catch (e) {
+        // 主动取消的请求不报错
+        if (e && e.name === 'AbortError') return;
+        alert("加载目录失败");
+    }
 }
 
 /**
@@ -394,6 +424,14 @@ function renderTableBody() {
         const tr = document.createElement("tr");
         tr.setAttribute("data-index", index);
 
+        // 预览：仅 files 视图 + 普通文件 + 可预览扩展
+        if (currentView === "files" && !item.is_dir) {
+            const previewKind = canPreview(item, ext);
+            if (previewKind) {
+                tr.ondblclick = () => previewFile(item, previewKind);
+                tr.style.cursor = "pointer";
+            }
+        }
         if (currentView === "files" && item.is_dir) {
             tr.ondblclick = () => loadPath(currentPath ? `${currentPath}/${item.name}` : item.name);
         }
@@ -772,6 +810,163 @@ function closeModal() {
     if (_modalKeydownHandler) {
         document.removeEventListener("keydown", _modalKeydownHandler, true);
         _modalKeydownHandler = null;
+    }
+}
+
+// ================= 预览（全页遮罩 + 中央白色画布） =================
+let _previewKeydownHandler = null;
+let _previewWheelHandler = null;
+let _previewZoom = 1;
+
+function closePreviewModal() {
+    const overlay = document.getElementById("previewOverlay");
+    if (overlay) overlay.remove();
+    if (_previewKeydownHandler) {
+        document.removeEventListener("keydown", _previewKeydownHandler, true);
+        _previewKeydownHandler = null;
+    }
+    if (_previewWheelHandler) {
+        // handler 绑在 stage 上，stage 会随 overlay 一起被移除，无需解绑
+        _previewWheelHandler = null;
+    }
+    _previewZoom = 1;
+}
+
+function _setPreviewZoom(z) {
+    _previewZoom = Math.max(0.1, Math.min(10, z));
+    const paper = document.getElementById("previewPaper");
+    if (paper) paper.style.setProperty("--preview-zoom", String(_previewZoom));
+}
+
+function _setupImageZoom(stage) {
+    _previewWheelHandler = (e) => {
+        // 阻止页面/外层滚动
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+        _setPreviewZoom(_previewZoom * factor);
+    };
+    stage.addEventListener("wheel", _previewWheelHandler, { passive: false });
+}
+
+/**
+ * 打开文件预览。kind=image 时 src 是后端 URL，浏览器直接渲染；
+ * kind=text 时由调用方预先 fetch 拿到 content 再传入。
+ * iconName 决定左上角 logo（默认 image / file）。
+ */
+function openPreviewModal({ title, kind, src, content, error, iconName }) {
+    closePreviewModal();
+    // 顺带关掉可能残留的重命名/移动弹窗
+    closeModal();
+
+    const logoName = iconName || (kind === "image" ? "image" : "file");
+    const logoSrc = `${CONFIG.API_BASE}/api/icon/${encodeURIComponent(logoName)}`;
+
+    const overlay = document.createElement("div");
+    overlay.className = "preview-overlay";
+    overlay.id = "previewOverlay";
+    overlay.innerHTML = `
+        <header class="preview-topbar">
+            <button class="preview-close" title="关闭" aria-label="关闭">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="#ececec">
+                    <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.41 13.41 12z"/>
+                </svg>
+            </button>
+            <img class="preview-logo" src="${escapeAttr(logoSrc)}" width="24" height="24" alt="" />
+            <span class="preview-filename" title="${escapeAttr(title)}">${escapeHtml(title)}</span>
+        </header>
+        <div class="preview-stage" id="previewStage">
+            <div class="preview-paper" id="previewPaper">
+                <div class="preview-content" id="previewContent"></div>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    const stage = overlay.querySelector("#previewStage");
+    const contentEl = overlay.querySelector("#previewContent");
+    overlay.querySelector(".preview-close").onclick = closePreviewModal;
+
+    // 点击舞台空白处（不在 paper 上）关闭
+    overlay.addEventListener("mousedown", (e) => {
+        if (e.target === overlay || e.target === stage) closePreviewModal();
+    });
+
+    // ESC 关闭（capture 阶段，与 openModal 同样的优先级）
+    _previewKeydownHandler = (e) => {
+        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePreviewModal(); }
+    };
+    document.addEventListener("keydown", _previewKeydownHandler, true);
+
+    _setPreviewZoom(1);
+
+    if (error) {
+        contentEl.innerHTML = `<div class="preview-message preview-error">${escapeHtml(error)}</div>`;
+        return;
+    }
+
+    if (kind === "image") {
+        contentEl.innerHTML = `<div class="preview-loading">加载中…</div>`;
+        const img = new Image();
+        img.alt = title;
+        img.className = "preview-image";
+        img.onload = () => {
+            contentEl.innerHTML = "";
+            contentEl.appendChild(img);
+            _setupImageZoom(stage);
+        };
+        img.onerror = () => {
+            contentEl.innerHTML = `<div class="preview-message preview-error">无法加载图片（文件可能已损坏）</div>`;
+        };
+        img.src = src;
+        return;
+    }
+
+    if (kind === "text") {
+        if (content !== undefined) {
+            contentEl.innerHTML = "";
+            const pre = document.createElement("pre");
+            pre.className = "preview-text";
+            pre.textContent = content || "";  // textContent 永不解析 HTML
+            contentEl.appendChild(pre);
+        }
+    }
+}
+
+/**
+ * 触发文件预览（双击文件行调用）。
+ * - image: 直接打开弹窗，<img> 走 GET /api/preview?kind=image
+ * - text : 先 fetch JSON，再把 content 注入 <pre>
+ */
+async function previewFile(item, kind) {
+    const relPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+    const url = `${CONFIG.API_BASE}/api/preview?path=${encodeURIComponent(relPath)}&kind=${kind}`;
+
+    if (kind === "image") {
+        openPreviewModal({ title: item.name, kind: "image", src: url, iconName: "image" });
+        return;
+    }
+
+    // text: 先开 loading 弹窗，再 fetch
+    openPreviewModal({ title: item.name, kind: "text", iconName: "file" });
+    try {
+        const res = await fetch(url);
+        const data = await res.json().catch(() => ({}));
+        const contentEl = document.getElementById("previewContent");
+        if (!contentEl) return;  // 弹窗已被关闭
+        if (!res.ok) {
+            const msg = (data && (data.error || data.detail)) || `HTTP ${res.status}`;
+            contentEl.innerHTML = `<div class="preview-message preview-error">${escapeHtml(msg)}</div>`;
+            return;
+        }
+        contentEl.innerHTML = "";
+        const pre = document.createElement("pre");
+        pre.className = "preview-text";
+        pre.textContent = data.content || "";
+        contentEl.appendChild(pre);
+    } catch (e) {
+        const contentEl = document.getElementById("previewContent");
+        if (contentEl) {
+            contentEl.innerHTML = `<div class="preview-message preview-error">加载失败：${escapeHtml(e.message || String(e))}</div>`;
+        }
     }
 }
 
@@ -1247,7 +1442,10 @@ dropZone.addEventListener("drop", (e) => {
 });
 
 function triggerFileInput() {
-    if(currentView !== "files") switchToFilesView();
+    if(currentView !== "files") {
+        switchToFilesView();
+        loadPath("");  // 上传到根目录
+    }
     document.getElementById("fileInput").click();
 }
 
@@ -1291,7 +1489,7 @@ async function handleNewFolder() {
     closeNewMenu();
     if (currentView !== "files") {
         switchToFilesView();
-        await new Promise(r => setTimeout(r, 0)); // 让目录加载先开始
+        await loadPath("");  // 在根目录创建
     }
     const raw = prompt("请输入新文件夹的名称");
     if (raw === null) return;
@@ -1330,6 +1528,10 @@ function handleUploadFile() {
 
 function handleUploadFolder() {
     closeNewMenu();
+    if (currentView !== "files") {
+        switchToFilesView();
+        loadPath("");  // 上传到根目录
+    }
     // 浏览器原生支持目录选择（Chrome/Edge/Firefox）
     document.getElementById("folderInput").click();
 }
@@ -1338,7 +1540,10 @@ async function handleFolderSelect(e) {
     const files = Array.from(e.target.files || []);
     e.target.value = ""; // 清空，允许重复选择同一目录
     if (files.length === 0) return;
-    if (currentView !== "files") switchToFilesView();
+    if (currentView !== "files") {
+        switchToFilesView();
+        await loadPath("");  // 上传到根目录
+    }
 
     const widget = document.getElementById("uploadWidget");
     widget.style.display = "block";
@@ -1527,6 +1732,30 @@ function getIcon(isDir, ext) {
     return `<i data-icon="${name}"></i>`;
 }
 
+// 单一来源：判断文件是否可预览以及属于哪一类。
+// 与后端 _IMAGE_MIME / _TEXT_EXTS 保持一致。
+const _PREVIEW_IMAGE_EXTS = new Set([
+    "jpg","jpeg","png","gif","webp","svg","bmp","ico"
+]);
+const _PREVIEW_TEXT_EXTS = new Set([
+    "txt","md","markdown","log","rst",
+    "js","jsx","ts","tsx","mjs","cjs",
+    "py","java","kt","scala","groovy",
+    "c","h","cpp","cc","cxx","hpp","hh",
+    "go","rs","swift","m","mm","rb","php",
+    "sh","bash","zsh","fish","ps1","bat","cmd",
+    "sql","lua","pl","r","dart","vue","svelte",
+    "css","scss","sass","less","html","htm","xml",
+    "json","yml","yaml","toml","ini","env","conf",
+    "properties","cfg","gradle","cmake",
+]);
+function canPreview(item, ext) {
+    if (!item || item.is_dir) return null;
+    if (_PREVIEW_IMAGE_EXTS.has(ext)) return "image";
+    if (_PREVIEW_TEXT_EXTS.has(ext)) return "text";
+    return null;
+}
+
 async function updateStorage() {
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/storage`);
@@ -1538,6 +1767,13 @@ async function updateStorage() {
 }
 
 function updateBreadcrumb() {
+    // navFiles（侧边栏「主目录」）仅在 files 视图且路径为 Home 时高亮，
+    // 进入任何子目录后应取消激活。
+    const navFiles = document.getElementById("navFiles");
+    if (navFiles) {
+        navFiles.classList.toggle("active", currentView === "files" && currentPath === "");
+    }
+
     const bc = document.getElementById("breadcrumb");
     if (currentView === "trash") {
         bc.innerHTML = `<span style="cursor:default; padding:2px 4px;">回收站</span>`;
