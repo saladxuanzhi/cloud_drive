@@ -1519,6 +1519,11 @@ function getIcon(isDir, ext) {
     let name = "file";
     if (isDir) name = "dir";
     else if (["jpg","png","jpeg","gif","webp"].includes(ext)) name = "image";
+    else if (["mp3","wav","flac","ogg","m4a","aac","wma","opus"].includes(ext)) name = "audio";
+    else if (["mp4","mkv","mov","avi","webm","flv","wmv","m4v"].includes(ext)) name = "video";
+    else if (ext === "pdf") name = "pdf";
+    else if (["md","markdown"].includes(ext)) name = "md";
+    else if (["zip","rar","7z","tar","gz","bz2","xz","tgz","tbz2","iso","jar","war"].includes(ext)) name = "zip";
     return `<i data-icon="${name}"></i>`;
 }
 
