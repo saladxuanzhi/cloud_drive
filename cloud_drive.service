@@ -1,0 +1,42 @@
+[Unit]
+Description=Cloud Drive
+After=network.target
+
+[Service]
+Type=simple
+User=xuanzhi
+WorkingDirectory=/opt/cloud_drive
+
+Environment="CLOUD_DRIVE_ROOT=/home"
+Environment="USER_ROOT=/home/xuanzhi"
+Environment="DRIVE_DATA_DIR=/home/cloud_drive_data"
+
+# 二级路径: 与 Nginx 反代前缀保持一致
+Environment="BASE_PATH=/cloud-drive"
+
+# 分享链接的公开 base URL(必须包含 BASE_PATH)
+Environment="PUBLIC_BASE_URL=https://www.realxuanzhi.top/cloud-drive"
+
+# Nginx 反代时取 X-Forwarded-For 作为真实 IP
+Environment="TRUST_PROXY=true"
+
+# CORS 白名单(没有跨域需求可留空)
+# Environment="ALLOWED_ORIGINS=https://drive.realxuanzhi.top"
+
+# 业务调优(可选)
+Environment="MAX_UPLOAD_SIZE=10737418240"
+Environment="RATE_LIMIT_UPLOAD_PER_MIN=30"
+Environment="RATE_LIMIT_TICKET_PER_MIN=60"
+Environment="COPY_LINK_TTL=3600"
+Environment="DIRECT_DOWNLOAD_TTL=60"
+
+# 推荐绑 127.0.0.1(只接受本地 Nginx 反代),避免直接对外暴露
+ExecStart=/home/xuanzhi/.conda/envs/cloud_drive/bin/python /opt/cloud_drive/main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloud_drive
+
+[Install]
+WantedBy=multi-user.target
