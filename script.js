@@ -1,7 +1,18 @@
 const CONFIG = {
     API_BASE: "",
-    DIRECT_TRANSFER_URL: window.location.origin
+    // 直接走当前 origin 即可,不再单独维护 DIRECT_TRANSFER_URL
 };
+
+/**
+ * 拼接父目录与子项名,避免 `parent ? parent + "/" + name : name` 散落各处。
+ * 会自动去除 name 自身的首尾斜杠,以及把 \ 统一为 /。
+ */
+function joinPath(parent, name) {
+    const cleanName = String(name || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (!parent) return cleanName;
+    if (!cleanName) return parent;
+    return `${parent}/${cleanName}`;
+}
 
 // ================= 侧边栏宽度拖拽 =================
 (function setupSidebarResizer() {
@@ -255,12 +266,28 @@ async function renderIcons(root) {
 })();
 
 window.addEventListener("DOMContentLoaded", () => {
-    // 首屏静态图标已内联到 HTML，无需 renderIcons(document.body)；
-    // 这里只处理动态按需加载（文件类型 dir/file/image、对话框 rename 等）。
-    updateStorage();
-    loadPinned();
-    switchToFilesView();
-    loadPath("");
+    // 启动期异常不再静默:开发阶段如果脚本本身有错,直接弹出提示
+    try {
+        // 首屏静态图标已内联到 HTML，无需 renderIcons(document.body)；
+        // 这里只处理动态按需加载（文件类型 dir/file/image、对话框 rename 等）。
+        updateStorage();
+        loadPinned();
+        switchToFilesView();
+        loadPath("");
+    } catch (e) {
+        console.error("[init]", e);
+        alert("页面初始化失败:" + (e && e.message ? e.message : e));
+    }
+});
+
+// 全局错误兜底:script 错误不再只丢到 console,屏幕也能看到
+window.addEventListener("error", (e) => {
+    if (e && e.error) {
+        console.error("[window.error]", e.error);
+    }
+});
+window.addEventListener("unhandledrejection", (e) => {
+    console.error("[unhandledrejection]", e.reason);
 });
 
 function switchToFilesView() {
@@ -347,14 +374,29 @@ async function loadPath(path) {
         const res = await fetch(`${CONFIG.API_BASE}/api/files?path=${encodeURIComponent(path)}`, {
             signal: currentListController.signal,
         });
+        if (!res.ok) {
+            // 后端错误,显示具体信息方便排查(限流 / 越权 / 404 等)
+            let detail = `HTTP ${res.status}`;
+            try {
+                const body = await res.json();
+                if (body && (body.detail || body.error)) {
+                    detail = body.detail || body.error;
+                }
+            } catch (_) { /* 响应不是 JSON,忽略 */ }
+            throw new Error(`后端 ${res.status}: ${detail}`);
+        }
         const data = await res.json();
+        if (!data || !Array.isArray(data.items)) {
+            throw new Error("后端返回格式异常:缺少 items 数组");
+        }
         currentItemsList = data.items;
         renderTableHeader();
         renderTableBody();
     } catch (e) {
         // 主动取消的请求不报错
         if (e && e.name === 'AbortError') return;
-        alert("加载目录失败");
+        console.error("[loadPath]", e);
+        alert("加载目录失败:" + (e && e.message ? e.message : e));
     }
 }
 
@@ -530,6 +572,208 @@ function renderTableHeader() {
     }
 }
 
+// ================= 虚拟滚动 =================
+// 列表项 >= VSCROLL_THRESHOLD 时,只渲染视口内 ±BUFFER 行的 DOM。
+// 实现方式:tbody 设为 position: relative,塞一个 spacer <tr> 撑出总高度,
+// 实际可见行 position: absolute 定位,DOM 节点数与列表大小解耦。
+const VSCROLL_THRESHOLD = 200;
+const VSCROLL_BUFFER = 8;
+let _vscrollContainer = null;
+let _vscrollAttached = false;
+let _vscrollRowHeight = 40;
+let _vscrollLastRange = null;
+let _vscrollResizeObs = null;
+
+function _vscrollGetContainer() {
+    if (_vscrollContainer && document.body.contains(_vscrollContainer)) {
+        return _vscrollContainer;
+    }
+    _vscrollContainer = document.querySelector(".file-list");
+    return _vscrollContainer;
+}
+
+function _vscrollMeasureRowHeight() {
+    const tbody = document.getElementById("fileTableBody");
+    if (!tbody) return _vscrollRowHeight;
+    const probe = tbody.querySelector("tr:not(.vscroll-spacer)");
+    if (probe) {
+        const h = probe.getBoundingClientRect().height;
+        if (h > 0 && Number.isFinite(h)) return h;
+    }
+    return _vscrollRowHeight;
+}
+
+function _vscrollOnScroll() {
+    const container = _vscrollGetContainer();
+    if (!container) return;
+    const rowH = _vscrollRowHeight;
+    const total = currentItemsList.length;
+    const scrollTop = container.scrollTop;
+    const viewport = container.clientHeight || 600;
+    const start = Math.max(0, Math.floor(scrollTop / rowH) - VSCROLL_BUFFER);
+    const end = Math.min(total, Math.ceil((scrollTop + viewport) / rowH) + VSCROLL_BUFFER);
+    if (_vscrollLastRange && _vscrollLastRange.start === start && _vscrollLastRange.end === end) return;
+    _vscrollLastRange = { start, end };
+    _vscrollRenderRows(start, end, rowH);
+}
+
+function _vscrollRenderRows(start, end, rowH) {
+    const tbody = document.getElementById("fileTableBody");
+    if (!tbody) return;
+    tbody.style.position = "relative";
+
+    // spacer 撑出总高度,这样 tbody 才有正确的滚动空间
+    let spacer = tbody.querySelector("tr.vscroll-spacer");
+    if (!spacer) {
+        spacer = document.createElement("tr");
+        spacer.className = "vscroll-spacer";
+        const td = document.createElement("td");
+        td.colSpan = 100;
+        td.style.border = "none";
+        td.style.padding = "0";
+        td.style.background = "transparent";
+        spacer.appendChild(td);
+        tbody.appendChild(spacer);
+    }
+    const totalH = currentItemsList.length * rowH;
+    spacer.firstElementChild.style.height = totalH + "px";
+
+    const old = tbody.querySelectorAll("tr:not(.vscroll-spacer)");
+    old.forEach(tr => tr.remove());
+
+    const frag = document.createDocumentFragment();
+    for (let i = start; i < end; i++) {
+        const item = currentItemsList[i];
+        const tr = _buildTableRow(item, i);
+        tr.style.position = "absolute";
+        tr.style.left = "0";
+        tr.style.right = "0";
+        tr.style.top = (i * rowH) + "px";
+        tr.style.height = rowH + "px";
+        frag.appendChild(tr);
+    }
+    tbody.appendChild(frag);
+    renderIcons(tbody);
+}
+
+function _vscrollAttach() {
+    if (_vscrollAttached) return;
+    const container = _vscrollGetContainer();
+    if (!container) return;
+    container.addEventListener("scroll", _vscrollOnScroll, { passive: true });
+    _vscrollAttached = true;
+    if (window.ResizeObserver) {
+        _vscrollResizeObs = new ResizeObserver(() => {
+            _vscrollLastRange = null;
+            _vscrollOnScroll();
+        });
+        _vscrollResizeObs.observe(container);
+    } else {
+        window.addEventListener("resize", () => {
+            _vscrollLastRange = null;
+            _vscrollOnScroll();
+        });
+    }
+}
+
+function _vscrollReset() {
+    _vscrollLastRange = null;
+    const tbody = document.getElementById("fileTableBody");
+    if (tbody) tbody.style.position = "";
+    const container = _vscrollGetContainer();
+    if (container) container.scrollTop = 0;
+}
+
+/**
+ * 构造单行 <tr>(不含位置样式),普通渲染与虚拟滚动共用。
+ */
+function _buildTableRow(item, index) {
+    const ext = item.name.split(".").pop().toLowerCase();
+    const tr = document.createElement("tr");
+    tr.setAttribute("data-index", index);
+
+    if (currentView === "files" && !item.is_dir) {
+        const previewKind = canPreview(item, ext);
+        if (previewKind) {
+            tr.ondblclick = () => previewFile(item, previewKind);
+            tr.style.cursor = "pointer";
+        }
+    }
+    if (currentView === "files" && item.is_dir) {
+        tr.ondblclick = () => loadPath(joinPath(currentPath, item.name));
+    }
+    if (currentView === "pinned") {
+        tr.ondblclick = () => openPinnedItem(index);
+        tr.style.cursor = "pointer";
+    }
+
+    let metaCells = "";
+    let actionCell = "";
+
+    if (currentView === "files") {
+        metaCells = `<td>${formatDate(item.modified)}</td><td>${formatBytes(item.size)}</td>`;
+        actionCell = `
+            <td>
+                <div style="display:flex;">
+                    <div class="action-btn" data-tooltip="重命名" onclick="event.stopPropagation(); openRenameDialog(${index})">
+                        <svg height="20" viewBox="0 -960 960 960" width="20" focusable="false" fill="currentColor"><path d="M351-144l144-144h369v144H351Zm-183-72h51l375-375-51-51-375 375v51Zm-72 72v-153l498-498q11-11 23.84-16 12.83-5 27-5 14.16 0 27.16 5t24 16l51 51q11 11 16 24t5 26.54q0 14.45-5.02 27.54T747-642L249-144H96Zm600-549-51-51 51 51Zm-127.95 76.95L543-642l51 51-25.95-25.05Z"/></svg>
+                    </div>
+                    <div class="action-btn" data-tooltip="移动" onclick="event.stopPropagation(); moveSingle('${escapeAttr(item.name)}')">
+                        <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10zm-8.01-9l-1.41 1.41L12.16 12H8v2h4.16l-1.59 1.59L11.99 17 16 13.01 11.99 9z"/></svg>
+                    </div>
+                    ${!item.is_dir ? `<div class="action-btn" data-tooltip="下载" onclick="event.stopPropagation(); downloadFile('${escapeAttr(item.name)}')">
+                        <svg height="20" width="20" viewBox="0 -960 960 960" fill="#444746"><path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"/></svg>
+                    </div>` : `<div class="action-btn" data-tooltip="下载文件夹" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.name)}')">
+                        <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M13 9h-2v4.2l-1.6-1.6L8 13l4 4 4-4-1.4-1.4-1.6 1.6ZM4 20c-.55 0-1.02-.2-1.41-.59s-.59-.86-.59-1.41V6c0-.55.2-1.02.59-1.41s.86-.59 1.41-.59h6l2 2h8c.55 0 1.02.2 1.41.59s.59.86.59 1.41v10c0 .55-.2 1.02-.59 1.41s-.86.59-1.41.59Zm0-2h16V8h-8.83l-2-2H4Z"/></svg>
+                    </div>`}
+                    <div class="action-btn" data-tooltip="移至回收站" onclick="event.stopPropagation(); trashSingle('${escapeAttr(item.name)}')">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4h-5zm2 15H7V6h10v13zM9 8h2v9H9zm4 0h2v9h-2z"/></svg>
+                    </div>
+                </div>
+            </td>`;
+    } else if (currentView === "pinned") {
+        metaCells = `<td style="color:var(--text-muted); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.full_path || "根目录")}">${escapeHtml(item.full_path || "根目录")}</td>`;
+        actionCell = `
+            <td>
+                <div style="display:flex;">
+                    <div class="action-btn" data-tooltip="进入目录" onclick="event.stopPropagation(); openPinnedItem(${index})">
+                        <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5z"/></svg>
+                    </div>
+                    <div class="action-btn" data-tooltip="下载" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.full_path)}')">
+                        <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M13 9h-2v4.2l-1.6-1.6L8 13l4 4 4-4-1.4-1.4-1.6 1.6ZM4 20c-.55 0-1.02-.2-1.41-.59s-.59-.86-.59-1.41V6c0-.55.2-1.02.59-1.41s.86-.59 1.41-.59h6l2 2h8c.55 0 1.02.2 1.41.59s.59.86.59 1.41v10c0 .55-.2 1.02-.59 1.41s-.86.59-1.41.59Zm0-2h16V8h-8.83l-2-2H4Z"/></svg>
+                    </div>
+                    <div class="action-btn" data-tooltip="取消固定" onclick="event.stopPropagation(); unpinFromMain(${index})">
+                        <svg width="20" width="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+                    </div>
+                </div>
+            </td>`;
+    } else {
+        metaCells = `
+            <td style="color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.original_path)}">${escapeHtml(item.original_path)}</td>
+            <td>${formatDate(item.deleted_at)}</td>
+            <td>${formatBytes(item.size)}</td>`;
+        actionCell = `
+            <td>
+                <div style="display:flex;">
+                    <div class="action-btn" data-tooltip="还原" onclick="event.stopPropagation(); restoreSingle('${escapeAttr(item.trashed_name)}')">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="#444746"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                    </div>
+                    <div class="action-btn" data-tooltip="永久删除" onclick="event.stopPropagation(); deletePermSingle('${escapeAttr(item.trashed_name)}')">
+                        <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M9.4 16.5l2.6-2.6 2.6 2.6 1.4-1.4-2.6-2.6L16 9.9l-1.4-1.4-2.6 2.6-2.6-2.6L8 9.9l2.6 2.6L8 15.1ZM7 21q-.825 0-1.412-.587Q5 19.825 5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413Q17.825 21 17 21ZM17 6H7v13h10ZM7 6v13Z"/></svg>
+                    </div>
+                </div>
+            </td>`;
+    }
+
+    tr.innerHTML = `
+        <td><div class="file-name-cell" data-name-cell="${index}">${getIcon(item.is_dir, ext)}<span style="font-weight: 500;">${escapeHtml(item.name)}</span></div></td>
+        ${metaCells}
+        ${actionCell}
+    `;
+    tr.onclick = (e) => handleRowClick(e, index);
+    return tr;
+}
+
 function renderTableBody() {
     const tbody = document.getElementById("fileTableBody");
     tbody.innerHTML = "";
@@ -541,108 +785,52 @@ function renderTableBody() {
         const colCount = currentView === "files" ? 4 : (currentView === "pinned" ? 3 : 5);
         const emptyText = currentView === "pinned" ? "尚未固定任何文件夹" : "空空如也";
         tbody.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center; padding:32px; color:#aaa;">${emptyText}</td></tr>`;
+        _vscrollReset();
         return;
     }
 
-    currentItemsList.forEach((item, index) => {
-        const ext = item.name.split(".").pop().toLowerCase();
-        const tr = document.createElement("tr");
-        tr.setAttribute("data-index", index);
+    if (currentItemsList.length >= VSCROLL_THRESHOLD) {
+        // 启用虚拟滚动:先临时放一行用于测行高,再清空正式渲染
+        const probe = _buildTableRow(currentItemsList[0], 0);
+        tbody.appendChild(probe);
+        _vscrollRowHeight = Math.max(1, _vscrollMeasureRowHeight());
+        _vscrollAttach();
+        _vscrollReset();
+        const container = _vscrollGetContainer();
+        const viewport = (container && container.clientHeight) || 600;
+        const start = 0;
+        const end = Math.min(
+            currentItemsList.length,
+            Math.ceil(viewport / _vscrollRowHeight) + VSCROLL_BUFFER * 2,
+        );
+        _vscrollLastRange = { start, end };
+        _vscrollRenderRows(start, end, _vscrollRowHeight);
+    } else {
+        // 普通全量渲染
+        _vscrollReset();
+        const frag = document.createDocumentFragment();
+        currentItemsList.forEach((item, index) => {
+            frag.appendChild(_buildTableRow(item, index));
+        });
+        tbody.appendChild(frag);
+        renderIcons(tbody);
+    }
 
-        // 预览：仅 files 视图 + 普通文件 + 可预览扩展
-        if (currentView === "files" && !item.is_dir) {
-            const previewKind = canPreview(item, ext);
-            if (previewKind) {
-                tr.ondblclick = () => previewFile(item, previewKind);
-                tr.style.cursor = "pointer";
-            }
-        }
-        if (currentView === "files" && item.is_dir) {
-            tr.ondblclick = () => loadPath(currentPath ? `${currentPath}/${item.name}` : item.name);
-        }
-        if (currentView === "pinned") {
-            // 双击进入该 pinned 目录
-            tr.ondblclick = () => openPinnedItem(index);
-            tr.style.cursor = "pointer";
-        }
-
-        let metaCells = "";
-        let actionCell = "";
-
-        if (currentView === "files") {
-            metaCells = `<td>${formatDate(item.modified)}</td><td>${formatBytes(item.size)}</td>`;
-            actionCell = `
-                <td>
-                    <div style="display:flex;">
-                        <div class="action-btn" data-tooltip="重命名" onclick="event.stopPropagation(); openRenameDialog(${index})">
-                            <svg height="20" viewBox="0 -960 960 960" width="20" focusable="false" fill="currentColor"><path d="M351-144l144-144h369v144H351Zm-183-72h51l375-375-51-51-375 375v51Zm-72 72v-153l498-498q11-11 23.84-16 12.83-5 27-5 14.16 0 27.16 5t24 16l51 51q11 11 16 24t5 26.54q0 14.45-5.02 27.54T747-642L249-144H96Zm600-549-51-51 51 51Zm-127.95 76.95L543-642l51 51-25.95-25.05Z"/></svg>
-                        </div>
-                        <div class="action-btn" data-tooltip="移动" onclick="event.stopPropagation(); moveSingle('${escapeAttr(item.name)}')">
-                            <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10zm-8.01-9l-1.41 1.41L12.16 12H8v2h4.16l-1.59 1.59L11.99 17 16 13.01 11.99 9z"/></svg>
-                        </div>
-                        ${!item.is_dir ? `<div class="action-btn" data-tooltip="下载" onclick="event.stopPropagation(); downloadFile('${escapeAttr(item.name)}')">
-                            <svg height="20" width="20" viewBox="0 96 960 960" fill="#444746"><path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"/></svg>
-                        </div>` : `<div class="action-btn" data-tooltip="下载文件夹" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.name)}')">
-                            <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M13 9h-2v4.2l-1.6-1.6L8 13l4 4 4-4-1.4-1.4-1.6 1.6ZM4 20c-.55 0-1.02-.2-1.41-.59s-.59-.86-.59-1.41V6c0-.55.2-1.02.59-1.41s.86-.59 1.41-.59h6l2 2h8c.55 0 1.02.2 1.41.59s.59.86.59 1.41v10c0 .55-.2 1.02-.59 1.41s-.86.59-1.41.59Zm0-2h16V8h-8.83l-2-2H4Z"/></svg>
-                        </div>`}
-                        <div class="action-btn" data-tooltip="移至回收站" onclick="event.stopPropagation(); trashSingle('${escapeAttr(item.name)}')">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4h-5zm2 15H7V6h10v13zM9 8h2v9H9zm4 0h2v9h-2z"/></svg>
-                        </div>
-                    </div>
-                </td>`;
-        } else if (currentView === "pinned") {
-            metaCells = `<td style="color:var(--text-muted); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.full_path || "根目录")}">${escapeHtml(item.full_path || "根目录")}</td>`;
-            actionCell = `
-                <td>
-                    <div style="display:flex;">
-                        <div class="action-btn" data-tooltip="进入目录" onclick="event.stopPropagation(); openPinnedItem(${index})">
-                            <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5z"/></svg>
-                        </div>
-                        <div class="action-btn" data-tooltip="下载" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.full_path)}')">
-                            <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M13 9h-2v4.2l-1.6-1.6L8 13l4 4 4-4-1.4-1.4-1.6 1.6ZM4 20c-.55 0-1.02-.2-1.41-.59s-.59-.86-.59-1.41V6c0-.55.2-1.02.59-1.41s.86-.59 1.41-.59h6l2 2h8c.55 0 1.02.2 1.41.59s.59.86.59 1.41v10c0 .55-.2 1.02-.59 1.41s-.86.59-1.41.59Zm0-2h16V8h-8.83l-2-2H4Z"/></svg>
-                        </div>
-                        <div class="action-btn" data-tooltip="取消固定" onclick="event.stopPropagation(); unpinFromMain(${index})">
-                            <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
-                        </div>
-                    </div>
-                </td>`;
-        } else {
-            metaCells = `
-                <td style="color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.original_path)}">${escapeHtml(item.original_path)}</td>
-                <td>${formatDate(item.deleted_at)}</td>
-                <td>${formatBytes(item.size)}</td>`;
-            actionCell = `
-                <td>
-                    <div style="display:flex;">
-                        <div class="action-btn" data-tooltip="还原" onclick="event.stopPropagation(); restoreSingle('${escapeAttr(item.trashed_name)}')">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="#444746"><path d="M0 0h24v24H0z" fill="none"/><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
-                        </div>
-                        <div class="action-btn" data-tooltip="永久删除" onclick="event.stopPropagation(); deletePermSingle('${escapeAttr(item.trashed_name)}')">
-                            <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M9.4 16.5l2.6-2.6 2.6 2.6 1.4-1.4-2.6-2.6L16 9.9l-1.4-1.4-2.6 2.6-2.6-2.6L8 9.9l2.6 2.6L8 15.1ZM7 21q-.825 0-1.412-.587Q5 19.825 5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413Q17.825 21 17 21ZM17 6H7v13h10ZM7 6v13Z"/></svg>
-                        </div>
-                    </div>
-                </td>`;
-        }
-
-        tr.innerHTML = `
-            <td><div class="file-name-cell" data-name-cell="${index}">${getIcon(item.is_dir, ext)}<span style="font-weight: 500;">${escapeHtml(item.name)}</span></div></td>
-            ${metaCells}
-            ${actionCell}
-        `;
-
-        tr.onclick = (e) => handleRowClick(e, index);
-        tbody.appendChild(tr);
-    });
-
-    // 渲染完后立刻把已有选中状态同步到 DOM（避免重新进入目录后高亮丢失）
+    // 渲染完后立刻把已有选中状态同步到 DOM(避免重新进入目录后高亮丢失)
     updateRowSelectionUI();
-    // 表格里出现过的图标按需请求并就地替换
-    renderIcons(tbody);
 }
 
+/**
+ * HTML 属性值转义:用于 onclick="..." 等场景,防止单/双引号逃逸导致 XSS。
+ * 与 escapeHtml 区别:属性上下文里还要转义单/双引号。
+ */
 function escapeAttr(s) {
     return String(s).replace(/[&"'<>]/g, c => ({"&":"&amp;",'"':"&quot;","'":"&#39;","<":"&lt;",">":"&gt;"}[c]));
 }
+/**
+ * HTML 文本节点转义:用于 innerHTML 插入文本内容,只防 < > &。
+ * textContent 场景不需要这个函数。
+ */
 function escapeHtml(s) {
     return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 }
@@ -814,35 +1002,66 @@ document.addEventListener("click", (e) => {
 });
 
 async function trashSingle(filename) {
-    const path = currentPath ? `${currentPath}/${filename}` : filename;
-    await fetch(`${CONFIG.API_BASE}/api/action/bulk_trash`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({paths: [path]})
-    });
+    const path = joinPath(currentPath, filename);
+    try {
+        const res = await fetch(`${CONFIG.API_BASE}/api/action/bulk_trash`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({paths: [path]})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            return alert("删除失败：" + (data.detail || `HTTP ${res.status}`));
+        }
+        if (data.errors && data.errors.length) {
+            alert("部分项目未删除：\n" + data.errors.join("\n"));
+        }
+    } catch (e) {
+        return alert("删除失败：" + e.message);
+    }
     loadPath(currentPath);
     updateStorage();
 }
 
 async function bulkTrash() {
     if (selectedItems.length === 0) return;
-    const paths = selectedItems.map(item => currentPath ? `${currentPath}/${item.name}` : item.name);
+    const paths = selectedItems.map(item => joinPath(currentPath, item.name));
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/action/bulk_trash`, {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({paths: paths})
         });
-        if (res.ok) { clearSelection(); loadPath(currentPath); updateStorage(); }
-    } catch (e) { alert("批量删除失败"); }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            return alert("批量删除失败：" + (data.detail || `HTTP ${res.status}`));
+        }
+        if (data.errors && data.errors.length) {
+            alert(`已删除 ${data.count} 项。\n以下项未删除：\n` + data.errors.join("\n"));
+        }
+        clearSelection();
+        loadPath(currentPath);
+        updateStorage();
+    } catch (e) { alert("批量删除失败：" + e.message); }
 }
 
 async function restoreSingle(trashedName) {
-    await fetch(`${CONFIG.API_BASE}/api/action/bulk_restore`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({trashed_names: [trashedName]})
-    });
+    try {
+        const res = await fetch(`${CONFIG.API_BASE}/api/action/bulk_restore`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({trashed_names: [trashedName]})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            return alert("还原失败：" + (data.detail || `HTTP ${res.status}`));
+        }
+        if (data.errors && data.errors.length) {
+            alert("部分项目未还原：\n" + data.errors.join("\n"));
+        }
+    } catch (e) {
+        return alert("还原失败：" + e.message);
+    }
     loadTrash();
     updateStorage();
 }
@@ -856,17 +1075,37 @@ async function bulkRestore() {
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({trashed_names: names})
         });
-        if (res.ok) { clearSelection(); loadTrash(); updateStorage(); }
-    } catch (e) { alert("批量恢复失败"); }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            return alert("批量恢复失败：" + (data.detail || `HTTP ${res.status}`));
+        }
+        if (data.errors && data.errors.length) {
+            alert(`已恢复 ${data.count} 项。\n以下项未恢复：\n` + data.errors.join("\n"));
+        }
+        clearSelection();
+        loadTrash();
+        updateStorage();
+    } catch (e) { alert("批量恢复失败：" + e.message); }
 }
 
 async function deletePermSingle(trashedName) {
     if (!confirm("确定要永久删除该项内容吗？此操作不可逆。")) return;
-    await fetch(`${CONFIG.API_BASE}/api/action/bulk_delete_permanently`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({trashed_names: [trashedName]})
-    });
+    try {
+        const res = await fetch(`${CONFIG.API_BASE}/api/action/bulk_delete_permanently`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({trashed_names: [trashedName]})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            return alert("永久删除失败：" + (data.detail || `HTTP ${res.status}`));
+        }
+        if (data.errors && data.errors.length) {
+            alert("部分项目未删除：\n" + data.errors.join("\n"));
+        }
+    } catch (e) {
+        return alert("永久删除失败：" + e.message);
+    }
     loadTrash();
     updateStorage();
 }
@@ -881,8 +1120,17 @@ async function bulkDeletePermanently() {
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({trashed_names: names})
         });
-        if (res.ok) { clearSelection(); loadTrash(); updateStorage(); }
-    } catch (e) { alert("批量永久删除失败"); }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            return alert("批量永久删除失败：" + (data.detail || `HTTP ${res.status}`));
+        }
+        if (data.errors && data.errors.length) {
+            alert(`已删除 ${data.count} 项。\n以下项未删除：\n` + data.errors.join("\n"));
+        }
+        clearSelection();
+        loadTrash();
+        updateStorage();
+    } catch (e) { alert("批量永久删除失败：" + e.message); }
 }
 
 async function bulkDownload() {
@@ -898,16 +1146,24 @@ async function bulkDownload() {
 }
 
 async function downloadFile(filename) {
-    const p = currentPath ? `${currentPath}/${filename}` : filename;
-    const res = await fetch(`${CONFIG.API_BASE}/api/download/ticket`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({path: p})
-    });
-    if(!res.ok) return;
+    const p = joinPath(currentPath, filename);
+    let res;
+    try {
+        res = await fetch(`${CONFIG.API_BASE}/api/download/ticket`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({path: p})
+        });
+    } catch (e) {
+        return showAlert("下载失败", "网络错误：" + e.message);
+    }
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        return showAlert("下载失败", data.detail || `HTTP ${res.status}`);
+    }
     const data = await res.json();
     const a = document.createElement("a");
-    a.href = `${CONFIG.DIRECT_TRANSFER_URL}/api/download/file?ticket=${data.ticket}`;
+    a.href = `/api/download/file?ticket=${data.ticket}`;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
@@ -915,7 +1171,7 @@ async function downloadFile(filename) {
 }
 
 async function downloadFolder(foldername) {
-    const p = currentPath ? `${currentPath}/${foldername}` : foldername;
+    const p = joinPath(currentPath, foldername);
     let res;
     try {
         res = await fetch(`${CONFIG.API_BASE}/api/download/folder/ticket`, {
@@ -929,7 +1185,6 @@ async function downloadFolder(foldername) {
 
     if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        // 413 = 文件夹过大；其它错误一并弹窗
         const msg = data.detail || data.error || `HTTP ${res.status}`;
         showAlert("文件夹下载失败", msg);
         return;
@@ -937,7 +1192,7 @@ async function downloadFolder(foldername) {
 
     const data = await res.json();
     const a = document.createElement("a");
-    a.href = `${CONFIG.DIRECT_TRANSFER_URL}/api/download/file?ticket=${data.ticket}`;
+    a.href = `/api/download/file?ticket=${data.ticket}`;
     a.download = data.filename || `${foldername}.zip`;
     document.body.appendChild(a);
     a.click();
@@ -1112,10 +1367,24 @@ function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
                 renderRaw();
                 return;
             }
+            const raw = contentEl.dataset.raw || "";
+            // 必须用 DOMPurify 消毒 marked 的输出,否则 `<img onerror=...>` 等可触发 XSS
+            const html = typeof DOMPurify !== "undefined"
+                ? DOMPurify.sanitize(marked.parse(raw), {
+                    ALLOWED_TAGS: [
+                        "a","b","i","em","strong","code","pre","blockquote",
+                        "ul","ol","li","p","br","hr","h1","h2","h3","h4","h5","h6",
+                        "img","table","thead","tbody","tr","th","td","del","sup","sub",
+                        "span","div",
+                    ],
+                    ALLOWED_ATTR: ["href","title","alt","src","colspan","rowspan"],
+                    ALLOW_DATA_ATTR: false,
+                })
+                : marked.parse(raw);  // DOMPurify 未加载时回退(理论上 CDN 失败)
             contentEl.innerHTML = "";
             const wrap = document.createElement("div");
             wrap.className = "preview-md";
-            wrap.innerHTML = marked.parse(contentEl.dataset.raw || "");
+            wrap.innerHTML = html;
             contentEl.appendChild(wrap);
         };
 
@@ -1165,7 +1434,7 @@ function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
  * - text : 先 fetch JSON，再把 content 注入 <pre>
  */
 async function previewFile(item, kind) {
-    const relPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+    const relPath = joinPath(currentPath, item.name);
     const url = `${CONFIG.API_BASE}/api/preview?path=${encodeURIComponent(relPath)}&kind=${kind}`;
     const ext = item.name.split(".").pop().toLowerCase();
 
@@ -1285,8 +1554,8 @@ function openRenameDialog(idx) {
             const err = _validateName(newName);
             if (err) { alert(err); return false; }
 
-            const oldPath = currentPath ? `${currentPath}/${oldName}` : oldName;
-            const newPath = currentPath ? `${currentPath}/${newName}` : newName;
+            const oldPath = joinPath(currentPath, oldName);
+            const newPath = joinPath(currentPath, newName);
             try {
                 const res = await fetch(`${CONFIG.API_BASE}/api/action/rename`, {
                     method: "POST",
@@ -1432,13 +1701,13 @@ async function togglePinCurrentPath() {
 
 // ================= 移动（弹窗选择目标目录） =================
 function moveSingle(filename) {
-    const path = currentPath ? `${currentPath}/${filename}` : filename;
+    const path = joinPath(currentPath, filename);
     openMoveDialog([path], filename);
 }
 
 function bulkMove() {
     if (currentView !== "files" || selectedItems.length === 0) return;
-    const paths = selectedItems.map(item => currentPath ? `${currentPath}/${item.name}` : item.name);
+    const paths = selectedItems.map(item => joinPath(currentPath, item.name));
     const label = selectedItems.length === 1 ? selectedItems[0].name : `${selectedItems.length} 项内容`;
     openMoveDialog(paths, label);
 }
@@ -1577,7 +1846,7 @@ async function copyLink() {
     }
 
     const file = files[0];
-    const path = currentPath ? `${currentPath}/${file.name}` : file.name;
+    const path = joinPath(currentPath, file.name);
 
     let data;
     try {
@@ -1662,16 +1931,24 @@ function cancelAllUploads() {
 const dropZone = document.getElementById("dropZone");
 const overlay = document.getElementById("dropOverlay");
 
+// 拖拽计数器:解决子元素反复触发 dragenter/dragleave 导致的 overlay 闪烁问题。
+// 每次 dragenter +1,每次 dragleave -1,只有回到 0 时才真正隐藏遮罩。
+let _dragCounter = 0;
+function _showDropOverlay() { overlay.classList.add("active"); }
+function _hideDropOverlay() { overlay.classList.remove("active"); }
+
 ["dragenter", "dragover", "dragleave", "drop"].forEach(eName => {
     document.body.addEventListener(eName, e => { e.preventDefault(); e.stopPropagation(); }, false);
 });
-["dragenter", "dragover"].forEach(eName => {
-    dropZone.addEventListener(eName, () => overlay.classList.add("active"), false);
-});
-["dragleave", "drop"].forEach(eName => {
-    dropZone.addEventListener(eName, () => overlay.classList.remove("active"), false);
+dropZone.addEventListener("dragenter", () => { _dragCounter++; _showDropOverlay(); });
+dropZone.addEventListener("dragover",  () => { _showDropOverlay(); });
+dropZone.addEventListener("dragleave", () => {
+    _dragCounter = Math.max(0, _dragCounter - 1);
+    if (_dragCounter === 0) _hideDropOverlay();
 });
 dropZone.addEventListener("drop", (e) => {
+    _dragCounter = 0;
+    _hideDropOverlay();
     const files = e.dataTransfer.files;
     if (files.length) handleFilesUpload(files);
 });
@@ -1738,7 +2015,7 @@ async function handleNewFolder() {
         return alert("名称不能以空格或点结尾");
     }
 
-    const path = currentPath ? `${currentPath}/${name}` : name;
+    const path = joinPath(currentPath, name);
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/action/create_folder`, {
             method: "POST",
@@ -1881,7 +2158,7 @@ function doUploadXHR(id, file, md5, relativePath = "") {
         fd.append("path", currentPath);
         fd.append("client_md5", md5);
         if (relativePath) fd.append("relative_path", relativePath);
-        xhr.open("POST", `${CONFIG.DIRECT_TRANSFER_URL}/api/upload`);
+        xhr.open("POST", `/api/upload`);
         xhr.send(fd);
     });
 }
@@ -2007,8 +2284,9 @@ function getIcon(isDir, ext) {
 
 // 单一来源：判断文件是否可预览以及属于哪一类。
 // 与后端 _IMAGE_MIME / _TEXT_EXTS 保持一致。
+// 注意:已移除 svg(SVG 内嵌脚本可通过 <img> 触发 XSS,改为只能下载不能预览)
 const _PREVIEW_IMAGE_EXTS = new Set([
-    "jpg","jpeg","png","gif","webp","svg","bmp","ico"
+    "jpg","jpeg","png","gif","webp","bmp","ico"
 ]);
 // 代码文件扩展名：用于 getIcon() 关联 icons/code.svg。
 // 纯文档类型（txt / md / markdown / log / rst）不属于"代码"，仍走各自或默认图标。
