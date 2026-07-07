@@ -266,12 +266,28 @@ async function renderIcons(root) {
 })();
 
 window.addEventListener("DOMContentLoaded", () => {
-    // 首屏静态图标已内联到 HTML，无需 renderIcons(document.body)；
-    // 这里只处理动态按需加载（文件类型 dir/file/image、对话框 rename 等）。
-    updateStorage();
-    loadPinned();
-    switchToFilesView();
-    loadPath("");
+    // 启动期异常不再静默:开发阶段如果脚本本身有错,直接弹出提示
+    try {
+        // 首屏静态图标已内联到 HTML，无需 renderIcons(document.body)；
+        // 这里只处理动态按需加载（文件类型 dir/file/image、对话框 rename 等）。
+        updateStorage();
+        loadPinned();
+        switchToFilesView();
+        loadPath("");
+    } catch (e) {
+        console.error("[init]", e);
+        alert("页面初始化失败:" + (e && e.message ? e.message : e));
+    }
+});
+
+// 全局错误兜底:script 错误不再只丢到 console,屏幕也能看到
+window.addEventListener("error", (e) => {
+    if (e && e.error) {
+        console.error("[window.error]", e.error);
+    }
+});
+window.addEventListener("unhandledrejection", (e) => {
+    console.error("[unhandledrejection]", e.reason);
 });
 
 function switchToFilesView() {
@@ -358,14 +374,29 @@ async function loadPath(path) {
         const res = await fetch(`${CONFIG.API_BASE}/api/files?path=${encodeURIComponent(path)}`, {
             signal: currentListController.signal,
         });
+        if (!res.ok) {
+            // 后端错误,显示具体信息方便排查(限流 / 越权 / 404 等)
+            let detail = `HTTP ${res.status}`;
+            try {
+                const body = await res.json();
+                if (body && (body.detail || body.error)) {
+                    detail = body.detail || body.error;
+                }
+            } catch (_) { /* 响应不是 JSON,忽略 */ }
+            throw new Error(`后端 ${res.status}: ${detail}`);
+        }
         const data = await res.json();
+        if (!data || !Array.isArray(data.items)) {
+            throw new Error("后端返回格式异常:缺少 items 数组");
+        }
         currentItemsList = data.items;
         renderTableHeader();
         renderTableBody();
     } catch (e) {
         // 主动取消的请求不报错
         if (e && e.name === 'AbortError') return;
-        alert("加载目录失败");
+        console.error("[loadPath]", e);
+        alert("加载目录失败:" + (e && e.message ? e.message : e));
     }
 }
 
