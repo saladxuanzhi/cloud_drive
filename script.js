@@ -819,6 +819,22 @@ function renderTableBody() {
     // 渲染完后立刻把已有选中状态同步到 DOM(避免重新进入目录后高亮丢失)
     updateRowSelectionUI();
 }
+
+/**
+ * HTML 属性值转义:用于 onclick="..." 等场景,防止单/双引号逃逸导致 XSS。
+ * 与 escapeHtml 区别:属性上下文里还要转义单/双引号。
+ */
+function escapeAttr(s) {
+    return String(s).replace(/[&"'<>]/g, c => ({"&":"&amp;",'"':"&quot;","'":"&#39;","<":"&lt;",">":"&gt;"}[c]));
+}
+/**
+ * HTML 文本节点转义:用于 innerHTML 插入文本内容,只防 < > &。
+ * textContent 场景不需要这个函数。
+ */
+function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+}
+
 /**
  * 行点击统一入口：
  *   普通点击          -> 单选（替换当前选择）
