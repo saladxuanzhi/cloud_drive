@@ -1009,13 +1009,16 @@ function _setupImageZoom(stage) {
  * kind=text 时由调用方预先 fetch 拿到 content 再传入。
  * iconName 决定左上角 logo（默认 image / file）。
  */
-function openPreviewModal({ title, kind, src, content, error, iconName }) {
+function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
     closePreviewModal();
     // 顺带关掉可能残留的重命名/移动弹窗
     closeModal();
 
     const logoName = iconName || (kind === "image" ? "image" : "file");
     const logoSrc = `${CONFIG.API_BASE}/api/icon/${encodeURIComponent(logoName)}`;
+
+    // 是否为 markdown 文件 —— 显示原文/渲染 切换按钮
+    const isMarkdown = (ext === "md" || ext === "markdown");
 
     const overlay = document.createElement("div");
     overlay.className = "preview-overlay";
@@ -1029,6 +1032,12 @@ function openPreviewModal({ title, kind, src, content, error, iconName }) {
             </button>
             <img class="preview-logo" src="${escapeAttr(logoSrc)}" width="24" height="24" alt="" />
             <span class="preview-filename" title="${escapeAttr(title)}">${escapeHtml(title)}</span>
+            ${isMarkdown ? `<button class="preview-toggle" id="previewToggle" type="button" title="切换纯文本 / 渲染" aria-label="切换视图">
+                <svg width="14" height="12" viewBox="0 0 14 12" fill="none">
+                    <path fill-rule="evenodd" clip-rule="evenodd" d="M1 0C0.447715 0 0 0.447715 0 1C0 1.55228 0.447715 2 1 2H13C13.5523 2 14 1.55228 14 1C14 0.447715 13.5523 0 13 0H1ZM0 6C0 5.44772 0.447715 5 1 5H13C13.5523 5 14 5.44772 14 6C14 6.55228 13.5523 7 13 7H1C0.447715 7 0 6.55228 0 6ZM1 10C0.447715 10 0 10.4477 0 11C0 11.5523 0.447715 12 1 12H13C13.5523 12 14 11.5523 14 11C14 10.4477 13.5523 10 13 10H1Z" fill="currentColor"/>
+                </svg>
+                <span id="previewToggleLabel">查看原文</span>
+            </button>` : ""}
         </header>
         <div class="preview-stage" id="previewStage">
             <div class="preview-paper" id="previewPaper">
@@ -1078,13 +1087,76 @@ function openPreviewModal({ title, kind, src, content, error, iconName }) {
 
     if (kind === "text") {
         if (content !== undefined) {
+            renderPreviewText(contentEl, content, { ext, isMarkdown });
+        }
+    }
+}
+
+/**
+ * 把文本内容写入预览区：
+ *   - md/markdown：默认渲染为 HTML（marked.js），切换按钮可在 渲染 ↔ 原文 之间切
+ *   - 其它文本（含代码文件）：保持纯文本展示，不做语法高亮
+ */
+function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
+    contentEl.innerHTML = "";
+
+    // ================ Markdown 分支 ================
+    if (isMarkdown) {
+        // 状态保存在 contentEl.dataset 上，避免污染全局变量
+        contentEl.dataset.mode = "rendered";
+        contentEl.dataset.raw = raw || "";
+
+        const renderRendered = () => {
+            if (typeof marked === "undefined") {
+                // 极端兜底：marked 未加载就退回原文
+                renderRaw();
+                return;
+            }
+            contentEl.innerHTML = "";
+            const wrap = document.createElement("div");
+            wrap.className = "preview-md";
+            wrap.innerHTML = marked.parse(contentEl.dataset.raw || "");
+            contentEl.appendChild(wrap);
+        };
+
+        const renderRaw = () => {
             contentEl.innerHTML = "";
             const pre = document.createElement("pre");
             pre.className = "preview-text";
-            pre.textContent = content || "";  // textContent 永不解析 HTML
+            pre.textContent = contentEl.dataset.raw || "";
             contentEl.appendChild(pre);
+        };
+
+        // 暴露给 toggle 按钮
+        contentEl._rendered = renderRendered;
+        contentEl._raw = renderRaw;
+        renderRendered();
+
+        // 绑定切换按钮
+        const btn = document.getElementById("previewToggle");
+        const label = document.getElementById("previewToggleLabel");
+        if (btn) {
+            btn.onclick = () => {
+                const next = contentEl.dataset.mode === "rendered" ? "raw" : "rendered";
+                contentEl.dataset.mode = next;
+                if (next === "rendered") {
+                    renderRendered();
+                    label.textContent = "查看原文";
+                } else {
+                    renderRaw();
+                    label.textContent = "查看渲染";
+                }
+            };
         }
+        return;
     }
+
+    // ================ 其它纯文本（含代码文件） ================
+    contentEl.innerHTML = "";
+    const pre = document.createElement("pre");
+    pre.className = "preview-text";
+    pre.textContent = raw || "";  // textContent 永不解析 HTML
+    contentEl.appendChild(pre);
 }
 
 /**
@@ -1104,8 +1176,13 @@ async function previewFile(item, kind) {
 
     // text: 先开 loading 弹窗，再 fetch。
     // logo 名称按扩展名取 —— 代码文件用 code.svg，markdown 用 md.svg，
-    // 与 file-list 行首图标保持完全一致。
-    openPreviewModal({ title: item.name, kind: "text", iconName: iconNameForExt(false, ext) });
+    // 与 file-list 行首图标保持完全一致。ext 透传给弹窗，让 Markdown 走渲染分支。
+    openPreviewModal({
+        title: item.name,
+        kind: "text",
+        iconName: iconNameForExt(false, ext),
+        ext,
+    });
     try {
         const res = await fetch(url);
         const data = await res.json().catch(() => ({}));
@@ -1116,11 +1193,7 @@ async function previewFile(item, kind) {
             contentEl.innerHTML = `<div class="preview-message preview-error">${escapeHtml(msg)}</div>`;
             return;
         }
-        contentEl.innerHTML = "";
-        const pre = document.createElement("pre");
-        pre.className = "preview-text";
-        pre.textContent = data.content || "";
-        contentEl.appendChild(pre);
+        renderPreviewText(contentEl, data.content || "", { ext, isMarkdown: ext === "md" || ext === "markdown" });
     } catch (e) {
         const contentEl = document.getElementById("previewContent");
         if (contentEl) {
