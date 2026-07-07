@@ -860,6 +860,15 @@ body:not([data-view="files"]) .path-box:hover {
     transform: rotate(0deg);
 }
 
+/* ================= 侧边栏：退出登录(anchor 形式的 nav-item) ================= */
+/* 复用 .nav-item 样式但用 <a> 实现, 需覆盖浏览器默认的蓝色/下划线 */
+.nav-item-link,
+.nav-item-link:hover,
+.nav-item-link:focus,
+.nav-item-link:visited {
+    text-decoration: none;
+}
+
 /* ================= 侧边栏：左侧 expander ================= */
 /* 所有 nav-item 左侧都有一个等宽占位；只有 navPinned 渲染可见三角 logo。
    通过占位统一其它 nav-item 的左缩进，避免文字偏移。 */
