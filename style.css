@@ -323,6 +323,10 @@ body:not([data-view="files"]) .path-box:hover {
     text-decoration: none;
 }
 
+.breadcrumb span:not(.separator) {
+    line-height: 1;
+}
+
 .breadcrumb .separator {
     display: inline-flex;
     align-items: center;

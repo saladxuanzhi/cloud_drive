@@ -1591,6 +1591,11 @@ async function loadPinned() {
     } catch (e) {
         pinnedPaths = [];
     }
+    // 首屏：若已有固定文件夹，自动展开侧边栏「已固定的文件夹」expander。
+    // loadPinned() 仅在 init() 中调用一次，此处只覆盖初始默认折叠态，不影响用户后续手动折叠。
+    if (pinnedPaths.length > 0 && !pinnedSectionOpen) {
+        pinnedSectionOpen = true;
+    }
     renderPinnedSidebar();
     updatePinButton();
 }
