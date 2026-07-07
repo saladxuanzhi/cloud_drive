@@ -154,10 +154,105 @@ async function renderIcons(root) {
         const name = el.getAttribute("data-icon");
         const svg = iconCache[name];
         if (!svg) continue;
-        // outerHTML 直接换掉占位元素；其余占位元素不受影响（各自拥有独立父节点）
-        el.outerHTML = svg;
+        // 占位符是 .icon-wrapper 容器，保留容器、把 SVG 注入到内部，
+        // 由 CSS 负责容器内 SVG 的居中与缩放，避免直接限制 svg 标签尺寸。
+        el.innerHTML = svg;
     }
 }
+
+// ================= 自定义 tooltip（仿 Google Drive） =================
+// 整页只创建一个浮层 <div class="data-tooltip">，通过事件委托监听所有
+// 带 [data-tooltip] 的元素：进入时填字 + 定位 + 显示，离开时隐藏。
+// 使用 mouseover/mouseout 而不是 mouseenter/mouseleave 是因为前者会冒泡，
+// 这样无需给每个目标单独绑定监听。
+(function setupTooltips() {
+    const TIP_GAP = 6;          // tooltip 与目标元素的间距 (px)
+    const VIEWPORT_PAD = 8;     // 离视口边缘的最小留白 (px)
+
+    // 单一浮层：延迟创建，避免无 tooltip 页面也带一个空的 div。
+    let tipEl = null;
+    function ensureTip() {
+        if (tipEl) return tipEl;
+        tipEl = document.createElement("div");
+        tipEl.className = "data-tooltip";
+        tipEl.setAttribute("role", "tooltip");
+        // pointer-events: none 防止浮层挡住 mousemove 触发连续定位
+        tipEl.style.pointerEvents = "none";
+        document.body.appendChild(tipEl);
+        return tipEl;
+    }
+
+    function findTooltipTarget(node) {
+        // 沿 DOM 树向上查找最近的带 [data-tooltip] 的祖先
+        while (node && node !== document) {
+            if (node.nodeType === 1 && node.hasAttribute && node.hasAttribute("data-tooltip")) {
+                return node;
+            }
+            node = node.parentNode;
+        }
+        return null;
+    }
+
+    function positionTip(target) {
+        const tip = ensureTip();
+        tip.textContent = target.getAttribute("data-tooltip") || "";
+        // 先显示才能拿到尺寸
+        tip.classList.add("visible");
+
+        const rect = target.getBoundingClientRect();
+        const tipRect = tip.getBoundingClientRect();
+        const scrollX = window.pageXOffset || document.documentElement.scrollLeft;
+        const scrollY = window.pageYOffset || document.documentElement.scrollTop;
+
+        // 默认放在元素正下方
+        let top = rect.bottom + TIP_GAP;
+        let left = rect.left + rect.width / 2 - tipRect.width / 2;
+
+        // 下方空间不足时翻到上方
+        const spaceBelow = window.innerHeight - rect.bottom;
+        if (spaceBelow < tipRect.height + TIP_GAP + VIEWPORT_PAD && rect.top > tipRect.height + TIP_GAP + VIEWPORT_PAD) {
+            top = rect.top - tipRect.height - TIP_GAP;
+        }
+
+        // 横向夹紧到视口内
+        const maxLeft = window.innerWidth - tipRect.width - VIEWPORT_PAD;
+        if (left < VIEWPORT_PAD) left = VIEWPORT_PAD;
+        if (left > maxLeft) left = maxLeft;
+
+        tip.style.top = (top + scrollY) + "px";
+        tip.style.left = (left + scrollX) + "px";
+    }
+
+    function hideTip() {
+        if (tipEl) tipEl.classList.remove("visible");
+    }
+
+    // mouseover 捕获进入：从触发节点向上找最近的 [data-tooltip]
+    document.addEventListener("mouseover", (e) => {
+        const target = findTooltipTarget(e.target);
+        if (target) {
+            positionTip(target);
+        } else {
+            // 移到了一个没有 tooltip 的区域，隐藏即可
+            hideTip();
+        }
+    });
+
+    // mouseout 捕获离开：relatedTarget 是新进入的节点，如果仍在某个 [data-tooltip]
+    // 子树内就不该隐藏 —— 借助 findTooltipTarget 判断。
+    document.addEventListener("mouseout", (e) => {
+        const next = findTooltipTarget(e.relatedTarget);
+        if (!next) hideTip();
+    });
+
+    // 滚动 / 窗口尺寸变化 / 按住隐藏原生 title 后，tooltip 应跟随消失
+    window.addEventListener("scroll", hideTip, true);
+    window.addEventListener("resize", hideTip);
+    // ESC 也关闭（对键盘用户友好）
+    window.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") hideTip();
+    });
+})();
 
 window.addEventListener("DOMContentLoaded", () => {
     // 首屏静态图标已内联到 HTML，无需 renderIcons(document.body)；
@@ -174,6 +269,7 @@ function switchToFilesView() {
     // 避免与调用方随后 loadPath(其他路径) 形成 fetch 竞争，
     // 导致面包屑与表格内容不一致。
     // 主目录仅在路径为 Home (currentPath === "") 时高亮，进入子目录后取消激活。
+    document.body.setAttribute("data-view", "files");
     document.getElementById("navFiles").classList.toggle("active", currentPath === "");
     document.getElementById("navPinned").classList.remove("active");
     document.getElementById("navTrash").classList.remove("active");
@@ -194,6 +290,7 @@ function navFilesClick() {
 
 function switchToPinnedView() {
     currentView = "pinned";
+    document.body.setAttribute("data-view", "pinned");
     document.getElementById("navFiles").classList.remove("active");
     document.getElementById("navPinned").classList.add("active");
     document.getElementById("navTrash").classList.remove("active");
@@ -205,6 +302,7 @@ function switchToPinnedView() {
 
 function switchToTrashView() {
     currentView = "trash";
+    document.body.setAttribute("data-view", "trash");
     document.getElementById("navFiles").classList.remove("active");
     document.getElementById("navPinned").classList.remove("active");
     document.getElementById("navTrash").classList.add("active");
@@ -303,6 +401,12 @@ async function loadTrash() {
 const SORT_ARROW_COLOR = "rgb(0, 74, 119)";
 const SORT_ARROW_BG = "rgb(194, 231, 255)";
 
+// 每个字段的默认排序方向：用于未排序列 tooltip，以及 handleSortClick 跨列切换。
+//   name    → asc  （A 到 Z）
+//   modified→ desc （新到旧）
+//   size    → desc （大到小）
+const SORT_DEFAULT_DIR = { name: "asc", modified: "desc", size: "desc" };
+
 /**
  * 构造可排序的列头：仅在 sortField === field 时显示箭头徽章，否则渲染占位 span。
  * 占位与箭头同尺寸，避免点击排序时列宽发生跳动。
@@ -312,12 +416,32 @@ function sortableTh(label, field) {
     const arrowHtml = isActive
         ? sortArrowSvg(sortDirection)
         : '<span class="sort-arrow-placeholder" aria-hidden="true"></span>';
-    return `<th class="sort-th${isActive ? " active" : ""}" data-field="${field}" onclick="handleSortClick('${field}', event)">
+    // tooltip 描述当前排序状态：
+    //   - 已排序列：展示当前方向文案
+    //   - 未排序列：展示若按此列排序时的默认方向文案
+    const tipDir = isActive ? sortDirection : (SORT_DEFAULT_DIR[field] || "asc");
+    const tooltip = sortTooltipText(field, tipDir);
+    return `<th class="sort-th${isActive ? " active" : ""}" data-field="${field}" data-tooltip="${tooltip}" onclick="handleSortClick('${field}', event)">
         <span class="sort-th-inner">
             <span class="sort-th-label">${label}</span>
             ${arrowHtml}
         </span>
     </th>`;
+}
+
+/**
+ * 排序 tooltip 文案：纯字段+方向 → 文案的查表。
+ * 文案直接描述「当前/默认」排序状态，不带「已按」「点击」等动作词。
+ */
+const SORT_TOOLTIP_TEXT = {
+    name:     { asc: "以A到Z的顺序排序",       desc: "以Z到A的顺序排序" },
+    modified: { asc: "以从旧到新的顺序排序",   desc: "以从新到旧的顺序排序" },
+    size:     { asc: "以从小到大的顺序排序",   desc: "以从大到小的顺序排序" },
+};
+function sortTooltipText(field, direction) {
+    const fieldMap = SORT_TOOLTIP_TEXT[field];
+    if (!fieldMap) return "";
+    return fieldMap[direction] || "";
 }
 
 function sortArrowSvg(direction) {
@@ -358,7 +482,7 @@ function sortItems() {
 }
 
 /**
- * 列头点击：同列切换方向，跨列重置为 asc。
+ * 列头点击：同列切换方向，跨列切换到该字段的默认方向（见 SORT_DEFAULT_DIR）。
  * stopPropagation 避免触发 document 的 click-outside-clear-selection 逻辑。
  */
 function handleSortClick(field, event) {
@@ -367,7 +491,8 @@ function handleSortClick(field, event) {
         sortDirection = sortDirection === "asc" ? "desc" : "asc";
     } else {
         sortField = field;
-        sortDirection = "asc";
+        // 跨列切换时，使用该字段的默认方向 —— 与未排序列的 tooltip 文案保持一致
+        sortDirection = SORT_DEFAULT_DIR[field] || "asc";
     }
     renderTableHeader(); // 更新箭头显示
     renderTableBody();   // 重新排序 + 重渲染
@@ -449,50 +574,50 @@ function renderTableBody() {
             actionCell = `
                 <td>
                     <div style="display:flex;">
-                        <div class="action-btn" title="重命名" onclick="event.stopPropagation(); openRenameDialog(${index})">
+                        <div class="action-btn" data-tooltip="重命名" onclick="event.stopPropagation(); openRenameDialog(${index})">
                             <svg height="20" viewBox="0 -960 960 960" width="20" focusable="false" fill="currentColor"><path d="M351-144l144-144h369v144H351Zm-183-72h51l375-375-51-51-375 375v51Zm-72 72v-153l498-498q11-11 23.84-16 12.83-5 27-5 14.16 0 27.16 5t24 16l51 51q11 11 16 24t5 26.54q0 14.45-5.02 27.54T747-642L249-144H96Zm600-549-51-51 51 51Zm-127.95 76.95L543-642l51 51-25.95-25.05Z"/></svg>
                         </div>
-                        <div class="action-btn" title="移动" onclick="event.stopPropagation(); moveSingle('${escapeAttr(item.name)}')">
+                        <div class="action-btn" data-tooltip="移动" onclick="event.stopPropagation(); moveSingle('${escapeAttr(item.name)}')">
                             <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10zm-8.01-9l-1.41 1.41L12.16 12H8v2h4.16l-1.59 1.59L11.99 17 16 13.01 11.99 9z"/></svg>
                         </div>
-                        ${!item.is_dir ? `<div class="action-btn" title="下载" onclick="event.stopPropagation(); downloadFile('${escapeAttr(item.name)}')">
+                        ${!item.is_dir ? `<div class="action-btn" data-tooltip="下载" onclick="event.stopPropagation(); downloadFile('${escapeAttr(item.name)}')">
                             <svg height="20" width="20" viewBox="0 96 960 960" fill="#444746"><path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"/></svg>
-                        </div>` : `<div class="action-btn" title="下载文件夹" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.name)}')">
+                        </div>` : `<div class="action-btn" data-tooltip="下载文件夹" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.name)}')">
                             <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M13 9h-2v4.2l-1.6-1.6L8 13l4 4 4-4-1.4-1.4-1.6 1.6ZM4 20c-.55 0-1.02-.2-1.41-.59s-.59-.86-.59-1.41V6c0-.55.2-1.02.59-1.41s.86-.59 1.41-.59h6l2 2h8c.55 0 1.02.2 1.41.59s.59.86.59 1.41v10c0 .55-.2 1.02-.59 1.41s-.86.59-1.41.59Zm0-2h16V8h-8.83l-2-2H4Z"/></svg>
                         </div>`}
-                        <div class="action-btn" title="移至回收站" onclick="event.stopPropagation(); trashSingle('${escapeAttr(item.name)}')">
+                        <div class="action-btn" data-tooltip="移至回收站" onclick="event.stopPropagation(); trashSingle('${escapeAttr(item.name)}')">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4h-5zm2 15H7V6h10v13zM9 8h2v9H9zm4 0h2v9h-2z"/></svg>
                         </div>
                     </div>
                 </td>`;
         } else if (currentView === "pinned") {
-            metaCells = `<td style="color:var(--text-muted); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeAttr(item.full_path)}">${escapeHtml(item.full_path || "根目录")}</td>`;
+            metaCells = `<td style="color:var(--text-muted); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.full_path || "根目录")}">${escapeHtml(item.full_path || "根目录")}</td>`;
             actionCell = `
                 <td>
                     <div style="display:flex;">
-                        <div class="action-btn" title="进入目录" onclick="event.stopPropagation(); openPinnedItem(${index})">
+                        <div class="action-btn" data-tooltip="进入目录" onclick="event.stopPropagation(); openPinnedItem(${index})">
                             <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5z"/></svg>
                         </div>
-                        <div class="action-btn" title="下载" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.full_path)}')">
+                        <div class="action-btn" data-tooltip="下载" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.full_path)}')">
                             <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M13 9h-2v4.2l-1.6-1.6L8 13l4 4 4-4-1.4-1.4-1.6 1.6ZM4 20c-.55 0-1.02-.2-1.41-.59s-.59-.86-.59-1.41V6c0-.55.2-1.02.59-1.41s.86-.59 1.41-.59h6l2 2h8c.55 0 1.02.2 1.41.59s.59.86.59 1.41v10c0 .55-.2 1.02-.59 1.41s-.86.59-1.41.59Zm0-2h16V8h-8.83l-2-2H4Z"/></svg>
                         </div>
-                        <div class="action-btn" title="取消固定" onclick="event.stopPropagation(); unpinFromMain(${index})">
+                        <div class="action-btn" data-tooltip="取消固定" onclick="event.stopPropagation(); unpinFromMain(${index})">
                             <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
                         </div>
                     </div>
                 </td>`;
         } else {
             metaCells = `
-                <td style="color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeAttr(item.original_path)}">${escapeHtml(item.original_path)}</td>
+                <td style="color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.original_path)}">${escapeHtml(item.original_path)}</td>
                 <td>${formatDate(item.deleted_at)}</td>
                 <td>${formatBytes(item.size)}</td>`;
             actionCell = `
                 <td>
                     <div style="display:flex;">
-                        <div class="action-btn" title="还原" onclick="event.stopPropagation(); restoreSingle('${escapeAttr(item.trashed_name)}')">
+                        <div class="action-btn" data-tooltip="还原" onclick="event.stopPropagation(); restoreSingle('${escapeAttr(item.trashed_name)}')">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="#444746"><path d="M0 0h24v24H0z" fill="none"/><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
                         </div>
-                        <div class="action-btn" title="永久删除" onclick="event.stopPropagation(); deletePermSingle('${escapeAttr(item.trashed_name)}')">
+                        <div class="action-btn" data-tooltip="永久删除" onclick="event.stopPropagation(); deletePermSingle('${escapeAttr(item.trashed_name)}')">
                             <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M9.4 16.5l2.6-2.6 2.6 2.6 1.4-1.4-2.6-2.6L16 9.9l-1.4-1.4-2.6 2.6-2.6-2.6L8 9.9l2.6 2.6L8 15.1ZM7 21q-.825 0-1.412-.587Q5 19.825 5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413Q17.825 21 17 21ZM17 6H7v13h10ZM7 6v13Z"/></svg>
                         </div>
                     </div>
@@ -635,6 +760,37 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && e.target.tagName !== "INPUT") {
         clearSelection();
     }
+});
+
+/**
+ * Ctrl/Cmd + A：选中当前文件列表中所有可见条目。
+ * 仅在 files 视图下生效，pinned/trash 视图由各自动作接管或暂不支持。
+ * 当焦点在 input/textarea/contenteditable 内时让浏览器自己处理（全选文字），
+ * 避免与 pathInput / rename input 等冲突。
+ */
+document.addEventListener("keydown", (e) => {
+    const isSelectAll = (e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A");
+    if (!isSelectAll) return;
+
+    // 焦点在文本输入控件里：交给浏览器默认行为（全选文字）
+    const t = e.target;
+    if (t && (
+        t.tagName === "INPUT" ||
+        t.tagName === "TEXTAREA" ||
+        t.isContentEditable
+    )) {
+        return;
+    }
+
+    if (currentView !== "files") return;
+    if (!currentItemsList || currentItemsList.length === 0) return;
+
+    e.preventDefault();
+    // 把当前列表全部置入 selectedItems；保持顺序以便后续范围选择行为一致
+    selectedItems = currentItemsList.slice();
+    lastSelectedIndex = currentItemsList.length - 1;
+    updateRowSelectionUI();
+    updateSelectionState();
 });
 
 /**
@@ -1159,7 +1315,9 @@ function updatePinButton() {
     if (!btn) return;
     const isPinned = currentView === "files" && pinnedPaths.includes(currentPath);
     btn.classList.toggle("pinned", isPinned);
-    btn.title = `${isPinned ? "取消固定" : "固定"}：${currentPath || "根目录"}`;
+    // 使用 data-tooltip 让全局自定义 tooltip 系统接管；
+    // 文案根据当前是否已固定动态切换，并带上目标路径让用户清楚自己要钉什么。
+    btn.setAttribute("data-tooltip", `${isPinned ? "取消固定" : "固定"}：${currentPath || "根目录"}`);
     // 当前目录变化时高亮 sidebar 对应节点
     document.querySelectorAll(".pinned-item.current").forEach(el => el.classList.remove("current"));
     if (isPinned) {
@@ -1421,7 +1579,8 @@ function cancelAllUploads() {
     Object.values(currentXHRs).forEach(xhr => xhr.abort());
     currentXHRs = {};
     document.getElementById("uwList").innerHTML = "";
-    updateUploadTitle();
+    // 用户主动取消：明确告诉 UI 这是"已完成"态（取消是终态）
+    updateUploadTitle("completed");
 }
 
 const dropZone = document.getElementById("dropZone");
@@ -1556,7 +1715,9 @@ async function handleFolderSelect(e) {
         const fileId = `up_${Date.now()}_${i}_${Math.floor(Math.random() * 1e6)}`;
 
         addUploadTaskUI(fileId, relPath);
-        updateUploadTitle();
+        // 关键：这里在 XHR 还没进 currentXHRs 之前就显式声明"正在上传"，
+        // 避免 updateUploadTitle 看 currentXHRs.length === 0 而误显示"上传已完成"。
+        updateUploadTitle("uploading");
 
         try {
             setUploadStatus(fileId, "正在计算 MD5...", 0);
@@ -1579,7 +1740,8 @@ async function handleFilesUpload(files) {
         let fileId = `up_${Date.now()}_${i}`;
 
         addUploadTaskUI(fileId, file.name);
-        updateUploadTitle();
+        // 显式声明"正在上传"，XHR 还没创建、currentXHRs 为空也能正确显示
+        updateUploadTitle("uploading");
 
         try {
             setUploadStatus(fileId, "正在计算 MD5...", 0);
@@ -1676,12 +1838,15 @@ async function setUploadStatus(id, text, percent, isError=false, isDone=false) {
 
     if (isError) {
         rightBox.innerHTML = `<span style="color:#d93025; font-size:12px;">${escapeHtml(text)}</span>`;
+        // 失败也是终态：检查是否还有未结束的任务，没有就切到 "已完成"
+        refreshUploadTitleAfterTaskEnd();
         return;
     }
     if (isDone) {
         // 成功图标
         rightBox.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="#0F9D58"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
-        updateUploadTitle();
+        // 成功也是终态：同样按 currentXHRs 是否清空决定是否切到 "已完成"
+        refreshUploadTitleAfterTaskEnd();
         return;
     }
 
@@ -1692,19 +1857,42 @@ async function setUploadStatus(id, text, percent, isError=false, isDone=false) {
     }
 }
 
-function updateUploadTitle() {
-    const activeTasks = Object.keys(currentXHRs).length;
+/**
+ * 上传窗口标题
+ * status 取值：
+ *   - 'idle'       准备中（widget 刚打开 / 还没选文件）
+ *   - 'uploading'  进行中（MD5 计算中、XHR 飞行中、或仍有未结束的任务）
+ *   - 'completed'  全部上传流程结束（成功 / 失败 / 取消之后）
+ */
+function updateUploadTitle(status) {
     const title = document.getElementById("uwTitle");
     const subbar = document.getElementById("uwSubbar");
+    const speed = document.getElementById("uwSpeed");
 
-    if(activeTasks > 0) {
-        title.innerText = `正在上传 ${activeTasks} 项内容`;
+    if (status === "uploading") {
+        title.innerText = "正在上传";
         subbar.style.display = "flex";
-        document.getElementById("uwSpeed").innerText = "传输中...";
+        if (speed) speed.innerText = "传输中...";
+    } else if (status === "completed") {
+        title.innerText = "上传已完成";
+        subbar.style.display = "none";
     } else {
-        title.innerText = `上传已完成`;
+        // 'idle' 或未识别值都走"准备上传"，避免空状态被误解为"已完成"
+        title.innerText = "准备上传";
         subbar.style.display = "none";
     }
+}
+
+/**
+ * 任意一个上传任务结束（成功 / 失败 / 取消）后调用：根据 currentXHRs 是否清空
+ * 决定切到 "completed" 还是保持 "uploading"。
+ * 集中这一个判定点，避免在每个 onload / onerror / onabort 处都重复判断。
+ */
+function refreshUploadTitleAfterTaskEnd() {
+    if (Object.keys(currentXHRs).length === 0) {
+        updateUploadTitle("completed");
+    }
+    // 仍有活跃任务：标题保持 "正在上传"，无需变化
 }
 
 function formatBytes(bytes) {
@@ -1719,7 +1907,9 @@ function formatDate(timestamp) {
     return `${d.getMonth()+1}月${d.getDate()}日`;
 }
 
-// 返回的是图标占位符，待 renderIcons 异步替换为真正的 SVG
+// 返回的是图标占位符，待 renderIcons 异步替换为真正的 SVG。
+// 使用 div.icon-wrapper 包裹，SVG 由 CSS 控制在容器内居中缩放，
+// 避免直接限制 svg 标签自身的尺寸。
 function getIcon(isDir, ext) {
     let name = "file";
     if (isDir) name = "dir";
@@ -1728,8 +1918,9 @@ function getIcon(isDir, ext) {
     else if (["mp4","mkv","mov","avi","webm","flv","wmv","m4v"].includes(ext)) name = "video";
     else if (ext === "pdf") name = "pdf";
     else if (["md","markdown"].includes(ext)) name = "md";
+    else if (_CODE_EXTS.has(ext)) name = "code";
     else if (["zip","rar","7z","tar","gz","bz2","xz","tgz","tbz2","iso","jar","war"].includes(ext)) name = "zip";
-    return `<i data-icon="${name}"></i>`;
+    return `<div class="icon-wrapper" data-icon="${name}"></div>`;
 }
 
 // 单一来源：判断文件是否可预览以及属于哪一类。
@@ -1737,17 +1928,23 @@ function getIcon(isDir, ext) {
 const _PREVIEW_IMAGE_EXTS = new Set([
     "jpg","jpeg","png","gif","webp","svg","bmp","ico"
 ]);
-const _PREVIEW_TEXT_EXTS = new Set([
-    "txt","md","markdown","log","rst",
+// 代码文件扩展名：用于 getIcon() 关联 icons/code.svg。
+// 纯文档类型（txt / md / markdown / log / rst）不属于"代码"，仍走各自或默认图标。
+const _CODE_EXTS = new Set([
     "js","jsx","ts","tsx","mjs","cjs",
     "py","java","kt","scala","groovy",
-    "c","h","cpp","cc","cxx","hpp","hh",
+    "c","h","cpp","cc","cxx","hpp","hh","cs",
     "go","rs","swift","m","mm","rb","php",
     "sh","bash","zsh","fish","ps1","bat","cmd",
     "sql","lua","pl","r","dart","vue","svelte",
     "css","scss","sass","less","html","htm","xml",
     "json","yml","yaml","toml","ini","env","conf",
     "properties","cfg","gradle","cmake",
+]);
+// 可预览的文本 = 代码文件 + 纯文本/日志/markdown（含代码但 md 走自己的图标）。
+const _PREVIEW_TEXT_EXTS = new Set([
+    "txt","md","markdown","log","rst",
+    ..._CODE_EXTS,
 ]);
 function canPreview(item, ext) {
     if (!item || item.is_dir) return null;
@@ -1791,7 +1988,7 @@ function updateBreadcrumb() {
         parts.forEach(p => {
             if(!p) return;
             cur += (cur ? "/" : "") + p;
-            html += `<span class="separator"> &gt; </span><span onclick="event.stopPropagation(); loadPath('${escapeAttr(cur)}')">${escapeHtml(p)}</span>`;
+            html += `<span class="separator"><svg class="a-s-fa-Ha-pa c-qd" width="24" height="24" viewBox="0 0 24 24" focusable="false" fill="rgb(116,119,117)"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path></svg></span><span onclick="event.stopPropagation(); loadPath('${escapeAttr(cur)}')">${escapeHtml(p)}</span>`;
         });
     }
     bc.innerHTML = html;
