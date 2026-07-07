@@ -1095,14 +1095,17 @@ function openPreviewModal({ title, kind, src, content, error, iconName }) {
 async function previewFile(item, kind) {
     const relPath = currentPath ? `${currentPath}/${item.name}` : item.name;
     const url = `${CONFIG.API_BASE}/api/preview?path=${encodeURIComponent(relPath)}&kind=${kind}`;
+    const ext = item.name.split(".").pop().toLowerCase();
 
     if (kind === "image") {
         openPreviewModal({ title: item.name, kind: "image", src: url, iconName: "image" });
         return;
     }
 
-    // text: 先开 loading 弹窗，再 fetch
-    openPreviewModal({ title: item.name, kind: "text", iconName: "file" });
+    // text: 先开 loading 弹窗，再 fetch。
+    // logo 名称按扩展名取 —— 代码文件用 code.svg，markdown 用 md.svg，
+    // 与 file-list 行首图标保持完全一致。
+    openPreviewModal({ title: item.name, kind: "text", iconName: iconNameForExt(false, ext) });
     try {
         const res = await fetch(url);
         const data = await res.json().catch(() => ({}));
@@ -1907,20 +1910,26 @@ function formatDate(timestamp) {
     return `${d.getMonth()+1}月${d.getDate()}日`;
 }
 
+// 单一事实：根据 isDir + ext 给出图标名（如 "file" / "code" / "md"）。
+// 既被 getIcon()（file-list 行首图标）使用，也被 openPreviewModal()
+// （预览弹窗左上角 logo）使用，保证两处展示一致。
+function iconNameForExt(isDir, ext) {
+    if (isDir) return "dir";
+    if (["jpg","png","jpeg","gif","webp"].includes(ext)) return "image";
+    if (["mp3","wav","flac","ogg","m4a","aac","wma","opus"].includes(ext)) return "audio";
+    if (["mp4","mkv","mov","avi","webm","flv","wmv","m4v"].includes(ext)) return "video";
+    if (ext === "pdf") return "pdf";
+    if (["md","markdown"].includes(ext)) return "md";
+    if (_CODE_EXTS.has(ext)) return "code";
+    if (["zip","rar","7z","tar","gz","bz2","xz","tgz","tbz2","iso","jar","war"].includes(ext)) return "zip";
+    return "file";
+}
+
 // 返回的是图标占位符，待 renderIcons 异步替换为真正的 SVG。
 // 使用 div.icon-wrapper 包裹，SVG 由 CSS 控制在容器内居中缩放，
 // 避免直接限制 svg 标签自身的尺寸。
 function getIcon(isDir, ext) {
-    let name = "file";
-    if (isDir) name = "dir";
-    else if (["jpg","png","jpeg","gif","webp"].includes(ext)) name = "image";
-    else if (["mp3","wav","flac","ogg","m4a","aac","wma","opus"].includes(ext)) name = "audio";
-    else if (["mp4","mkv","mov","avi","webm","flv","wmv","m4v"].includes(ext)) name = "video";
-    else if (ext === "pdf") name = "pdf";
-    else if (["md","markdown"].includes(ext)) name = "md";
-    else if (_CODE_EXTS.has(ext)) name = "code";
-    else if (["zip","rar","7z","tar","gz","bz2","xz","tgz","tbz2","iso","jar","war"].includes(ext)) name = "zip";
-    return `<div class="icon-wrapper" data-icon="${name}"></div>`;
+    return `<div class="icon-wrapper" data-icon="${iconNameForExt(isDir, ext)}"></div>`;
 }
 
 // 单一来源：判断文件是否可预览以及属于哪一类。
