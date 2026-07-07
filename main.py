@@ -1191,4 +1191,5 @@ async def upload_file(
 if __name__ == "__main__":
     import uvicorn
     # 绑定 127.0.0.1(由 Nginx 反代对外),如需直连请用 0.0.0.0 + 防火墙
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 只保留应用自身 logger(启动/错误)的输出。
+    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
