@@ -35,7 +35,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ================= 配置区 =================
-CLOUD_DRIVE_ROOT = os.getenv("CLOUD_DRIVE_ROOT", "/var/lib/cloud-drive")
+# 平台自适应默认根目录:
+#   - Windows: D:\Drive(开发习惯;若不存在会自动创建)
+#   - Linux/macOS: ~/cloud-drive(用户级,无需 root)
+# 推荐通过环境变量 CLOUD_DRIVE_ROOT 显式指定生产环境路径,
+# 不要依赖默认值 —— 部署到不同机器时默认值不会自动迁移。
+import sys as _sys
+if _sys.platform == "win32":
+    _DEFAULT_DRIVE_ROOT = "D:\\Drive"
+else:
+    _DEFAULT_DRIVE_ROOT = str(Path.home() / "cloud-drive")
+
+CLOUD_DRIVE_ROOT = os.getenv("CLOUD_DRIVE_ROOT", _DEFAULT_DRIVE_ROOT)
 USER_ROOT = os.getenv("USER_ROOT", CLOUD_DRIVE_ROOT)
 DRIVE_DATA_DIR = os.getenv("DRIVE_DATA_DIR", os.path.join(CLOUD_DRIVE_ROOT, ".system_data"))
 TRASH_DIR = os.path.join(DRIVE_DATA_DIR, ".trash")
@@ -132,14 +143,52 @@ _WINDOWS_RESERVED = (
 )
 
 # ================= 路径/目录初始化 =================
-for d in (CLOUD_DRIVE_ROOT, USER_ROOT, DRIVE_DATA_DIR, TRASH_DIR, TEMP_DIR, LOG_DIR):
-    Path(d).mkdir(parents=True, exist_ok=True)
-_user_root_resolved = Path(USER_ROOT).resolve()
-_system_root_resolved = Path(CLOUD_DRIVE_ROOT).resolve()
-if not _user_root_resolved.is_relative_to(_system_root_resolved):
-    raise RuntimeError(
-        f"USER_ROOT ({USER_ROOT}) 必须是 CLOUD_DRIVE_ROOT ({CLOUD_DRIVE_ROOT}) 的子目录或相同目录"
-    )
+def _validate_and_init_dirs() -> None:
+    """启动时严格校验 CLOUD_DRIVE_ROOT 可用性,失败时给出明确指引,而不是到
+    第一个 HTTP 请求时才发现路径不可访问。"""
+    root = Path(CLOUD_DRIVE_ROOT)
+
+    # 1. 显式禁掉看起来像 Windows 盘符的相对路径(防止 Linux 下出现 ./D:\Drive 这种
+    #    "创建成功但访问不到"的情况)
+    if _sys.platform != "win32" and re.match(r"^[A-Za-z]:[\\/]", str(root)):
+        raise RuntimeError(
+            f"CLOUD_DRIVE_ROOT={CLOUD_DRIVE_ROOT!r} 是 Windows 盘符路径,但当前平台是 "
+            f"{_sys.platform}。请通过环境变量显式指定 Linux 路径,例如:\n"
+            f"  export CLOUD_DRIVE_ROOT=/var/lib/cloud-drive\n"
+            f"或在 ~/.bashrc 中设置。脚本默认会在 Linux 下用 {Path.home() / 'cloud-drive'}。"
+        )
+
+    # 2. 创建(若已存在则跳过)
+    try:
+        for d in (CLOUD_DRIVE_ROOT, USER_ROOT, DRIVE_DATA_DIR, TRASH_DIR, TEMP_DIR, LOG_DIR):
+            Path(d).mkdir(parents=True, exist_ok=True)
+    except PermissionError as e:
+        raise RuntimeError(
+            f"无法创建 CLOUD_DRIVE_ROOT={CLOUD_DRIVE_ROOT} 下的目录: 权限不足 ({e})。"
+            f"请确保运行用户对路径有写权限,或换一个可写目录。"
+        ) from e
+    except OSError as e:
+        raise RuntimeError(
+            f"无法创建 CLOUD_DRIVE_ROOT={CLOUD_DRIVE_ROOT}: {e}。"
+            f"请检查路径是否合法、所在父目录是否存在且可写。"
+        ) from e
+
+    # 3. 校验确实可读可写(防止挂载只读卷等情况)
+    if not os.access(str(root), os.R_OK | os.W_OK | os.X_OK):
+        raise RuntimeError(
+            f"CLOUD_DRIVE_ROOT={root} 不可读/写/执行。请检查权限或挂载状态。"
+        )
+
+    # 4. 校验 USER_ROOT 在 CLOUD_DRIVE_ROOT 之内
+    user_root_resolved = Path(USER_ROOT).resolve()
+    system_root_resolved = Path(CLOUD_DRIVE_ROOT).resolve()
+    if not user_root_resolved.is_relative_to(system_root_resolved):
+        raise RuntimeError(
+            f"USER_ROOT ({USER_ROOT}) 必须是 CLOUD_DRIVE_ROOT ({CLOUD_DRIVE_ROOT}) 的子目录或相同目录"
+        )
+
+
+_validate_and_init_dirs()
 if not Path(PINNED_FILE).exists():
     Path(PINNED_FILE).write_text("[]", encoding="utf-8")
 if not Path(TRASH_DB_FILE).exists():
