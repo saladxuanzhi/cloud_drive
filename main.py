@@ -1,20 +1,3 @@
-"""
-单用户云盘后端 (FastAPI)。
-
-运行模式:通常通过 Nginx 反向代理对外暴露,鉴权由 Nginx 承担(参见 Nginx 配置)。
-本进程通常绑定 127.0.0.1:8000,默认开启 X-Forwarded-For 信任,以便读取真实客户端 IP
-用于限流与审计日志。
-
-安全要点(2026-07 重构):
-  - 路径遍历:get_safe_path 用 Path.is_relative_to,Linux/Windows 都安全。
-  - 上传防护:危险扩展黑名单(可配置)、文件大小上限、流式校验。
-  - 票务防爆破:ticket 仍为 uuid4(122 位熵),但加入失败计数与 IP 锁定。
-  - 限流:基于 IP 的滑动窗口(内存),针对高频/高成本端点单独配置。
-  - 审计:trash/restore/delete/share/upload/download/move/rename 等动作写 audit.log。
-  - CORS:不与 allow_credentials=True 联用;若需 CORS 需显式配置环境变量。
-  - 响应头:全部响应带 X-Content-Type-Options: nosniff,降低 MIME 嗅探风险。
-"""
-
 import os
 import shutil
 import json
