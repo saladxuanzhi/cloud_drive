@@ -70,9 +70,6 @@ TRUST_PROXY = os.getenv("TRUST_PROXY", "true").lower() in ("1", "true", "yes")
 # 二级路径前缀(留空 = 跑在根路径)。配合 Nginx 反代时使用,例如:
 #   location /cloud-drive/ { proxy_pass http://127.0.0.1:8000/; ... }
 #   export BASE_PATH=/cloud-drive
-# 1) FastAPI 拿到这个值后, OpenAPI/Swagger 链接会自带前缀
-# 2) 分享链接的构造也会带上它(详见 _build_share_url)
-# 3) 前端 index.html 中的 __BASE_PATH__ 内联脚本会从 window.location 推断出同样的值
 # 注意: 路径首尾都不带 /, 中间也不会有多个连续的 /; 前端判断时已容错。
 BASE_PATH = os.getenv("BASE_PATH", "").rstrip("/")
 
