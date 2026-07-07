@@ -1,6 +1,8 @@
 const CONFIG = {
-    API_BASE: "",
-    // 直接走当前 origin 即可,不再单独维护 DIRECT_TRANSFER_URL
+    // 从 index.html 头部内联脚本注入的全局变量读取二级路径。
+    // 例如跑在 https://example.com/cloud-drive/ 时,值为 "/cloud-drive";
+    // 跑在根路径时,值为 ""。所有 API 调用都会自动加上这个前缀。
+    API_BASE: window.__BASE_PATH__ || "",
 };
 
 /**
@@ -128,7 +130,7 @@ async function loadIcon(name) {
     if (iconFailed.has(name)) return "";
     if (iconInflight.has(name)) return iconInflight.get(name);
 
-    const p = fetch(`/api/icon/${encodeURIComponent(name)}`)
+    const p = fetch(`${CONFIG.API_BASE}/api/icon/${encodeURIComponent(name)}`)
         .then(async res => {
             if (!res.ok) {
                 iconFailed.add(name);
@@ -1163,7 +1165,7 @@ async function downloadFile(filename) {
     }
     const data = await res.json();
     const a = document.createElement("a");
-    a.href = `/api/download/file?ticket=${data.ticket}`;
+    a.href = `${CONFIG.API_BASE}/api/download/file?ticket=${data.ticket}`;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
@@ -1192,7 +1194,7 @@ async function downloadFolder(foldername) {
 
     const data = await res.json();
     const a = document.createElement("a");
-    a.href = `/api/download/file?ticket=${data.ticket}`;
+    a.href = `${CONFIG.API_BASE}/api/download/file?ticket=${data.ticket}`;
     a.download = data.filename || `${foldername}.zip`;
     document.body.appendChild(a);
     a.click();
@@ -2158,7 +2160,7 @@ function doUploadXHR(id, file, md5, relativePath = "") {
         fd.append("path", currentPath);
         fd.append("client_md5", md5);
         if (relativePath) fd.append("relative_path", relativePath);
-        xhr.open("POST", `/api/upload`);
+        xhr.open("POST", `${CONFIG.API_BASE}/api/upload`);
         xhr.send(fd);
     });
 }

@@ -4,6 +4,33 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Private Cloud</title>
+    <!--
+        BASE_PATH 推断: 让前端知道自己在哪个子路径下,这样所有 API 链接和静态资源
+        都能自动带上正确前缀。支持在 Nginx 反代下以 /cloud-drive/ 等任意二级路径运行。
+        - https://example.com/cloud-drive/  -> __BASE_PATH__ = "/cloud-drive"
+        - https://example.com/cloud-drive   -> __BASE_PATH__ = "/cloud-drive" (Nginx 会重定向到带 /)
+        - https://example.com/              -> __BASE_PATH__ = ""
+        必须在所有 script 之前定义,这样后续 script.js 才能读到。
+
+        启发式: 看末段是否像文件名(有扩展名)。
+        - 像文件名 (如 index.html) -> 去掉, 保留目录部分
+        - 不像文件名 (如 cloud-drive 或空) -> 整路径就是 base, 去掉末尾 /
+    -->
+    <script>
+        (function () {
+            const path = window.location.pathname || "/";
+            const lastSlash = path.lastIndexOf("/");
+            const lastSegment = lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
+            const hasExtension = /\.[a-z0-9]{1,5}$/i.test(lastSegment);
+            let base;
+            if (hasExtension) {
+                base = lastSlash > 0 ? path.substring(0, lastSlash) : "";
+            } else {
+                base = path.replace(/\/+$/, "");
+            }
+            window.__BASE_PATH__ = base;
+        })();
+    </script>
     <!-- 引入外部 CSS 样式文件 -->
     <link rel="stylesheet" href="style.css">
     <!-- 引入 SparkMD5 插件 -->

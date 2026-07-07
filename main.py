@@ -27,7 +27,7 @@ import sys as _sys
 if _sys.platform == "win32":
     _DEFAULT_DRIVE_ROOT = "D:\\Drive"
 else:
-    _DEFAULT_DRIVE_ROOT = str(Path.home() / "cloud-drive")
+    _DEFAULT_DRIVE_ROOT = Path.home()
 
 CLOUD_DRIVE_ROOT = os.getenv("CLOUD_DRIVE_ROOT", _DEFAULT_DRIVE_ROOT)
 USER_ROOT = os.getenv("USER_ROOT", CLOUD_DRIVE_ROOT)
@@ -66,6 +66,15 @@ TICKET_FAIL_LOCKOUT = 900
 
 # Nginx 反代时是否信任 X-Forwarded-For。直连部署请设为 false。
 TRUST_PROXY = os.getenv("TRUST_PROXY", "true").lower() in ("1", "true", "yes")
+
+# 二级路径前缀(留空 = 跑在根路径)。配合 Nginx 反代时使用,例如:
+#   location /cloud-drive/ { proxy_pass http://127.0.0.1:8000/; ... }
+#   export BASE_PATH=/cloud-drive
+# 1) FastAPI 拿到这个值后, OpenAPI/Swagger 链接会自带前缀
+# 2) 分享链接的构造也会带上它(详见 _build_share_url)
+# 3) 前端 index.html 中的 __BASE_PATH__ 内联脚本会从 window.location 推断出同样的值
+# 注意: 路径首尾都不带 /, 中间也不会有多个连续的 /; 前端判断时已容错。
+BASE_PATH = os.getenv("BASE_PATH", "").rstrip("/")
 
 # CORS:为空时回退到 [] (不开放);"*" 显式打开,只用于开发(不能配 credentials)
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "")
@@ -329,7 +338,7 @@ def _ticket_record_success(ip: str) -> None:
 
 
 # ================= FastAPI 应用 =================
-app = FastAPI(title="Single-User Cloud Drive")
+app = FastAPI(title="Single-User Cloud Drive", root_path=BASE_PATH)
 
 # CORS:不与 allow_credentials 联用;默认关闭,需显式开启
 if ALLOWED_ORIGINS:
@@ -921,10 +930,12 @@ def generate_folder_download_ticket(req: ActionReq, request: Request):
 
 def _build_share_url(request: Request, ticket_id: str) -> str:
     """构造分享链接。优先使用环境变量 PUBLIC_BASE_URL(避免 Host 头伪造);
-    未配置时回退到 request.base_url。"""
+    未配置时回退到 request.base_url(自动包含 root_path)。"""
     public_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
     if public_base:
-        return f"{public_base}/api/download/file?ticket={ticket_id}"
+        # PUBLIC_BASE_URL 已经包含了 base_path 形式(如 https://example.com/cloud-drive)
+        return f"{public_base}{BASE_PATH}/api/download/file?ticket={ticket_id}"
+    # request.base_url 在设置了 root_path 后会自动包含前缀, 不需要手动加
     base = str(request.base_url).rstrip("/")
     return f"{base}/api/download/file?ticket={ticket_id}"
 
