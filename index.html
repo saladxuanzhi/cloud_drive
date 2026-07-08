@@ -142,7 +142,7 @@
             <div class="selection-bar" id="selectionBar" aria-hidden="true">
                 <!-- 1. 清除选择 与 数量文本 -->
                 <div class="sel-left">
-                    <button class="sel-icon-btn" onclick="clearSelection()" title="清除选择" aria-label="清除选择">
+                    <button class="sel-icon-btn" onclick="clearSelection()" data-tooltip="清除选择" aria-label="清除选择">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="#444746"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
                     </button>
                     <span class="sel-text" id="selectCount">已选择 0 项内容</span>
@@ -150,25 +150,25 @@
 
                 <!-- 2. 操作图标 (紧贴左侧文本) -->
                 <div class="sel-actions">
-                    <button class="sel-icon-btn" id="selDownload" onclick="bulkDownload()" title="下载" aria-label="下载">
+                    <button class="sel-icon-btn" id="selDownload" onclick="bulkDownload()" data-tooltip="下载" aria-label="下载">
                         <svg height="20" width="20" viewBox="0 96 960 960" fill="#444746"><path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"/></svg>
                     </button>
-                    <button class="sel-icon-btn" id="selMove" onclick="bulkMove()" title="移动" aria-label="移动">
+                    <button class="sel-icon-btn" id="selMove" onclick="bulkMove()" data-tooltip="移动" aria-label="移动">
                         <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10zm-8.01-9l-1.41 1.41L12.16 12H8v2h4.16l-1.59 1.59L11.99 17 16 13.01 11.99 9z"/></svg>
                     </button>
-                    <button class="sel-icon-btn" id="selTrash" onclick="bulkTrash()" title="移除" aria-label="移除">
+                    <button class="sel-icon-btn" id="selTrash" onclick="bulkTrash()" data-tooltip="移除" aria-label="移除">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4h-5zm2 15H7V6h10v13zM9 8h2v9H9zm4 0h2v9h-2z"/></svg>
                     </button>
-                    <button class="sel-icon-btn" id="selLink" onclick="copyLink()" title="复制链接" aria-label="复制链接">
+                    <button class="sel-icon-btn" id="selLink" onclick="copyLink()" data-tooltip="复制链接" aria-label="复制链接">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3.9 12c0-1.7 1.4-3.1 3.1-3.1h4V7H7c-2.8 0-5 2.2-5 5s2.2 5 5 5h4v-1.9H7C5.3 15.1 3.9 13.7 3.9 12zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.7 0 3.1 1.4 3.1 3.1s-1.4 3.1-3.1 3.1h-4V17h4c2.8 0 5-2.2 5-5s-2.2-5-5-5z"/></svg>
                     </button>
-                    <button class="sel-icon-btn" id="selRestore" onclick="bulkRestore()" title="还原" aria-label="还原">
+                    <button class="sel-icon-btn" id="selRestore" onclick="bulkRestore()" data-tooltip="还原" aria-label="还原">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="#444746"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
                     </button>
-                    <button class="sel-icon-btn" id="selDeletePerm" onclick="bulkDeletePermanently()" title="永久删除" aria-label="永久删除">
+                    <button class="sel-icon-btn" id="selDeletePerm" onclick="bulkDeletePermanently()" data-tooltip="永久删除" aria-label="永久删除">
                         <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M9.4 16.5l2.6-2.6 2.6 2.6 1.4-1.4-2.6-2.6L16 9.9l-1.4-1.4-2.6 2.6-2.6-2.6L8 9.9l2.6 2.6L8 15.1ZM7 21q-.825 0-1.412-.587Q5 19.825 5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413Q17.825 21 17 21ZM17 6H7v13h10ZM7 6v13Z"/></svg>
                     </button>
-                    <button class="sel-icon-btn" id="selMore" title="更多操作" aria-label="更多操作">
+                    <button class="sel-icon-btn" id="selMore" data-tooltip="更多操作" aria-label="更多操作">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
                     </button>
                 </div>

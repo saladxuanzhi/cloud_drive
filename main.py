@@ -1077,6 +1077,7 @@ async def upload_file(
     path: str = Form(""),
     client_md5: str = Form(...),
     relative_path: str = Form(""),
+    overwrite: bool = Form(False),
 ):
     """统一上传入口。
     - 单文件上传:relative_path 留空,最终路径为 path/file.filename。
@@ -1146,8 +1147,8 @@ async def upload_file(
                 raise HTTPException(500, f"创建目录失败:{e}")
         else:
             final_path = target_dir / safe_name
-            # 冲突检查
-            if final_path.exists():
+            # 冲突检查：客户端显式确认可覆盖时跳过（让 os.replace 走原子的覆盖语义）
+            if final_path.exists() and not overwrite:
                 temp_path.unlink(missing_ok=True)
                 raise HTTPException(409, f"已存在同名文件:{safe_name}")
 

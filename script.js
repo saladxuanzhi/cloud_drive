@@ -2193,23 +2193,148 @@ async function handleFilesUpload(files) {
     widget.style.display = "block";
     widget.classList.remove("collapsed");
 
+    // 上传前先静默刷新一次目录列表，确保冲突检测用的是最新状态（其它 tab / 后台动作可能改动）
+    await refreshItemsListForConflict();
+
     for (let i = 0; i < files.length; i++) {
         let file = files[i];
         let fileId = `up_${Date.now()}_${i}`;
 
-        addUploadTaskUI(fileId, file.name);
+        // 询问同名文件处理：是（覆盖）/ 重命名（自动加 "(1)"）/ 取消
+        let decision;
+        try {
+            decision = await askUploadConflict(file);
+        } catch (_) {
+            decision = { action: "upload", name: file.name, overwrite: false };
+        }
+
+        if (decision.action === "skip") {
+            // 用户取消：在上传队列里留一条"已取消"记录，行内给出原文件名
+            addUploadTaskUI(fileId, file.name);
+            setUploadStatus(fileId, "已取消", 0, true);
+            continue;
+        }
+
+        // 用 modal 解析后的最终名字作为队列显示名（覆盖 / 重命名后都更新用户可见的标签）
+        addUploadTaskUI(fileId, decision.name);
         // 显式声明"正在上传"，XHR 还没创建、currentXHRs 为空也能正确显示
         updateUploadTitle("uploading");
 
         try {
             setUploadStatus(fileId, "正在计算 MD5...", 0);
             let md5 = await calculateMD5(file);
-            await doUploadXHR(fileId, file, md5);
+            await doUploadXHR(fileId, file, md5, "", decision.name, decision.overwrite);
         } catch (err) {
             setUploadStatus(fileId, "失败: " + err, 0, true);
         }
     }
 }
+
+// ================= 上传冲突处理（同名文件提示） =================
+
+// 给定一个文件名和当前目录已有名字集合，
+// 返回一个不冲突的新名字：在 stem 后追加 "(1)"、"(2)"…直到不与已有名字重复。
+// 例如 "foo.txt" + {"foo.txt", "foo (1).txt"} -> "foo (2).txt"
+function computeUniqueName(originalName, existingNames) {
+    const set = existingNames instanceof Set ? existingNames : new Set(existingNames);
+    if (!set.has(originalName)) return originalName;
+
+    // 拆分 stem 和扩展名：以最后一个点为界（隐藏文件如 ".gitignore" 视为无扩展名）
+    const dot = originalName.lastIndexOf(".");
+    let stem, ext;
+    if (dot <= 0) {
+        stem = originalName;
+        ext = "";
+    } else {
+        stem = originalName.slice(0, dot);
+        ext = originalName.slice(dot); // 包含 "."
+    }
+
+    for (let i = 1; i < 10000; i++) {
+        const candidate = `${stem} (${i})${ext}`;
+        if (!set.has(candidate)) return candidate;
+    }
+    // 极端情况下 1 万次都没找到唯一名，附加一个时间戳兜底
+    return `${stem} (${Date.now()})${ext}`;
+}
+
+// 静默地刷新当前目录列表到 currentItemsList，供冲突检测使用。
+// 不触发 URL 同步 / breadcrumb 等副作用 —— 仅拉一次 GET /api/files。
+async function refreshItemsListForConflict() {
+    if (currentView !== "files") return;
+    try {
+        const res = await fetch(`${CONFIG.API_BASE}/api/files?path=${encodeURIComponent(currentPath)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && Array.isArray(data.items)) currentItemsList = data.items;
+    } catch (_) { /* 失败时沿用旧列表 */ }
+}
+
+// 给定一个待上传文件，返回上传决策：
+//   { action: "upload", name, overwrite }
+//   { action: "skip" }                     用户取消该文件
+// 仅当当前目录已有同名文件时弹出 modal；没冲突时直接放行。
+function askUploadConflict(file) {
+    const existing = new Set((currentItemsList || []).map(it => it.name));
+    if (!existing.has(file.name)) {
+        return Promise.resolve({ action: "upload", name: file.name, overwrite: false });
+    }
+
+    return new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        overlay.className = "modal-overlay";
+        overlay.innerHTML = `
+            <div class="modal" role="dialog" aria-modal="true">
+                <div class="modal-header">
+                    <h2 class="modal-title">文件已存在</h2>
+                    <button class="modal-close" title="关闭" data-close>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="#444746"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <p>当前目录已存在「<strong>${escapeHtml(file.name)}</strong>」文件，是否覆盖现有文件？</p>
+                </div>
+                <div class="modal-footer">
+                    <button class="modal-btn modal-btn-text" data-act="cancel">取消</button>
+                    <button class="modal-btn modal-btn-text" data-act="rename">重命名</button>
+                    <button class="modal-btn modal-btn-primary" data-act="overwrite">是，覆盖</button>
+                </div>
+            </div>`;
+        // 用专属 id 与其他 modal 区分，避免被 closeModal() 误删
+        overlay.id = "conflictModalOverlay";
+        document.body.appendChild(overlay);
+
+        // 局部 ESC 处理
+        const escHandler = (e) => {
+            if (e.key === "Escape") { e.preventDefault(); finish("cancel"); }
+        };
+        document.addEventListener("keydown", escHandler, true);
+
+        function finish(act) {
+            document.removeEventListener("keydown", escHandler, true);
+            overlay.remove();
+            if (act === "overwrite") {
+                resolve({ action: "upload", name: file.name, overwrite: true });
+            } else if (act === "rename") {
+                const newName = computeUniqueName(file.name, existing);
+                resolve({ action: "upload", name: newName, overwrite: false });
+            } else {
+                resolve({ action: "skip" });
+            }
+        }
+
+        overlay.addEventListener("mousedown", (e) => {
+            if (e.target === overlay) finish("cancel");
+            if (e.target.closest("[data-close]")) finish("cancel");
+        });
+        overlay.querySelector('[data-act="cancel"]').onclick = () => finish("cancel");
+        overlay.querySelector('[data-act="rename"]').onclick = () => finish("rename");
+        overlay.querySelector('[data-act="overwrite"]').onclick = () => finish("overwrite");
+        overlay.querySelector('[data-act="overwrite"]').focus();
+    });
+}
+
+// ================= MD5 / XHR 上传核心 =================
 
 function calculateMD5(file) {
     return new Promise((resolve, reject) => {
@@ -2236,7 +2361,7 @@ function calculateMD5(file) {
     });
 }
 
-function doUploadXHR(id, file, md5, relativePath = "") {
+function doUploadXHR(id, file, md5, relativePath = "", resolvedName = "", overwrite = false) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         currentXHRs[id] = xhr;
@@ -2259,10 +2384,16 @@ function doUploadXHR(id, file, md5, relativePath = "") {
         xhr.onabort = () => { delete currentXHRs[id]; reject("已取消"); };
 
         const fd = new FormData();
-        fd.append("file", file);
+        // 重命名时：用 resolvedName 构造一个新 File 对象，保留原 blob/type。
+        // File 对象本身的名字不可改，必须新建。
+        const part = (resolvedName && resolvedName !== file.name)
+            ? new File([file], resolvedName, { type: file.type, lastModified: file.lastModified })
+            : file;
+        fd.append("file", part);
         fd.append("path", currentPath);
         fd.append("client_md5", md5);
         if (relativePath) fd.append("relative_path", relativePath);
+        if (overwrite) fd.append("overwrite", "1");
         xhr.open("POST", `${CONFIG.API_BASE}/api/upload`);
         xhr.send(fd);
     });
