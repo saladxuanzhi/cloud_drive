@@ -118,7 +118,7 @@
                 <!-- 1. 路径显示与编辑区域：点击空白处进入编辑模式 -->
                 <div class="path-box" id="pathBox" onclick="enterPathEditMode()">
                     <div class="breadcrumb" id="breadcrumb">
-                        <span onclick="event.stopPropagation(); loadPath('')">Home</span>
+                        <span onclick="event.stopPropagation(); navFilesClick()">Home</span>
                     </div>
                     <input type="text" id="pathInput" class="path-input" autocomplete="off"
                            onblur="exitPathEditMode()"

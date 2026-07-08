@@ -23,45 +23,59 @@ function joinPath(parent, name) {
 // 部署在子路径(例如 /cloud-drive/)时,所有 URL 都自动保留 __BASE_PATH__ 前缀。
 
 /**
- * 从当前 location.search 解出 path 参数。
- * - 返回 "" 表示根目录(URL 上不带 ?path 也算根)
- * - 自动去掉前导 "/",匹配内部 currentPath 的表示
- * - 拒绝包含空字符的非法值,返回 null 表示"URL 没有有效路径"
+ * 从当前 location.search 解出"应该显示的视图与路径"。
+ * 返回 { view, path }:
+ *   - ?view=trash  → { view: "trash",  path: "" }        回收站
+ *   - ?view=pinned → { view: "pinned", path: "" }        已固定的文件夹
+ *   - ?path=foo/bar→ { view: "files",  path: "foo/bar" } 文件视图子目录
+ *   - 其它(含无参数 / 非法值)→ { view: "files", path: "" } 主目录
+ * 说明:主目录、回收站、已固定的文件夹各自拥有专属 URL,刷新/前进/后退都能恢复。
  */
-function pathFromUrl() {
-    let raw;
+function stateFromUrl() {
+    let params;
     try {
-        raw = new URLSearchParams(window.location.search).get("path");
+        params = new URLSearchParams(window.location.search);
     } catch (_) {
-        return null;
+        return { view: "files", path: "" };
     }
-    if (raw === null) return null;          // URL 完全没有 ?path
+    const view = params.get("view");
+    if (view === "trash") return { view: "trash", path: "" };
+    if (view === "pinned") return { view: "pinned", path: "" };
+
+    const raw = params.get("path");
+    if (raw === null) return { view: "files", path: "" };          // 无 ?path,视为主目录
     const normalized = String(raw).replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
-    if (normalized === "") return "";       // ?path= 或 ?path=/// 也视为根
-    if (/[\x00-\x1f]/.test(normalized)) return null; // 控制字符视为非法
-    return normalized;
+    if (normalized === "") return { view: "files", path: "" };     // ?path= 或 ?path=/// 也视为根
+    if (/[\x00-\x1f]/.test(normalized)) return { view: "files", path: "" }; // 控制字符视为非法
+    return { view: "files", path: normalized };
 }
 
 /**
- * 给定内部路径,返回应该出现在地址栏上的相对 URL(不含 origin)。
- * 根目录为 __BASE_PATH__,子目录追加 ?path=...。
+ * 依据当前 currentView + currentPath,返回应出现在地址栏上的相对 URL(不含 origin)。
+ *   - 回收站            → __BASE_PATH__ + "?view=trash"
+ *   - 已固定的文件夹     → __BASE_PATH__ + "?view=pinned"
+ *   - 主目录            → __BASE_PATH__
+ *   - 文件视图子目录     → __BASE_PATH__ + "?path=..."
  */
-function urlForPath(p) {
+function urlForState() {
     const base = window.__BASE_PATH__ || "";
-    const path = (p == null || p === "") ? "" : String(p);
+    if (currentView === "trash") return `${base}?view=trash`;
+    if (currentView === "pinned") return `${base}?view=pinned`;
+    const path = (currentPath == null || currentPath === "") ? "" : String(currentPath);
     return path ? `${base}?path=${encodeURIComponent(path)}` : `${base}`;
 }
 
 /**
- * 把当前 currentPath 同步到浏览器地址栏。
+ * 把当前视图 + currentPath 同步到浏览器地址栏。
  * replace=true 用 history.replaceState(不增加历史项,启动期用);
  * replace=false 用 history.pushState(用户每次导航都新增一项,浏览器后退能回到上一步)。
  * 幂等:URL 已是目标时跳过,避免污染历史栈。
- * skipWhenFromPopstate=true 时跳过自身——popstate 触发的 loadPath 不应再写历史。
+ * skipWhenFromPopstate=true 时跳过自身——popstate 触发的导航不应再写历史。
  */
 function syncUrlFromState(replace, { skipWhenFromPopstate = false } = {}) {
     if (skipWhenFromPopstate && _popstateNavigating) return;
-    const target = urlForPath(currentPath);
+    const target = urlForState();
+    const state = { view: currentView, path: currentPath };
     const current =
         window.location.pathname +
         (window.location.search || "") +
@@ -71,9 +85,9 @@ function syncUrlFromState(replace, { skipWhenFromPopstate = false } = {}) {
     if (norm(current) === norm(target)) return;
     try {
         if (replace) {
-            window.history.replaceState({ path: currentPath }, "", target);
+            window.history.replaceState(state, "", target);
         } else {
-            window.history.pushState({ path: currentPath }, "", target);
+            window.history.pushState(state, "", target);
         }
     } catch (e) {
         // 文件:// 或权限异常环境下 history API 可能抛错;不影响网盘功能
@@ -82,20 +96,31 @@ function syncUrlFromState(replace, { skipWhenFromPopstate = false } = {}) {
 }
 
 /**
- * 读取 URL 并导航。供 DOMContentLoaded 与 popstate 共用。
- * 会在 loadPath 之前 set 一个内部标志,阻止 pushState 重入。
+ * 读取 URL 并导航到对应视图/目录。供 DOMContentLoaded 与 popstate 共用。
+ * 会在导航期间 set 一个内部标志,阻止视图切换与 loadPath 再次写历史(pushState 重入)。
  */
 let _popstateNavigating = false;
 function navigateFromUrl({ replace = false } = {}) {
-    const p = pathFromUrl();
-    if (p === null) {
-        // URL 里没有 path 参数或非法,直接显示根目录并把 URL 收拾干净
-        _popstateNavigating = true;
-        return Promise.resolve(loadPath("")).finally(() => { _popstateNavigating = false; });
-    }
+    const { view, path } = stateFromUrl();
     _popstateNavigating = true;
+    const done = () => { _popstateNavigating = false; };
+
+    if (view === "trash") {
+        switchToTrashView();
+        if (replace) syncUrlFromState(true, { skipWhenFromPopstate: true });
+        done();
+        return Promise.resolve();
+    }
+    if (view === "pinned") {
+        switchToPinnedView();
+        if (replace) syncUrlFromState(true, { skipWhenFromPopstate: true });
+        done();
+        return Promise.resolve();
+    }
+    // files 视图:切到文件视图并加载目标目录(path 为 "" 即主目录)
+    switchToFilesView();
     if (replace) syncUrlFromState(true, { skipWhenFromPopstate: true });
-    return Promise.resolve(loadPath(p)).finally(() => { _popstateNavigating = false; });
+    return Promise.resolve(loadPath(path || "")).finally(done);
 }
 
 // ================= 侧边栏宽度拖拽 =================
@@ -356,9 +381,9 @@ window.addEventListener("DOMContentLoaded", () => {
         // 这里只处理动态按需加载（文件类型 dir/file/image、对话框 rename 等）。
         updateStorage();
         loadPinned();
-        switchToFilesView();
-        // 从 URL 恢复当前路径(刷新页面 / 直接打开分享链接时能回到原目录)。
-        // replace=true 让首次定位不增加历史项;URL 无 path 或 path 非法时,内部走 ""。
+        // 从 URL 恢复视图与目录(刷新页面 / 直接打开分享链接时能回到原视图):
+        //   ?view=trash → 回收站, ?view=pinned → 已固定的文件夹, ?path=... / 无参 → 文件视图。
+        // replace=true 让首次定位不增加历史项;视图切换由 navigateFromUrl 统一处理。
         navigateFromUrl({ replace: true });
     } catch (e) {
         console.error("[init]", e);
@@ -396,13 +421,30 @@ function switchToFilesView() {
     clearSelection();
 }
 
-// 侧边栏「主目录」点击：切到 files 视图并回到 Home。
-// 当处于 files 视图且已在 Home 时跳过 loadPath 避免无谓请求；
-// 处于 pinned/trash 等非 files 视图或子目录时，强制 loadPath("") 刷新表格内容。
+// 侧边栏「主目录」 / 面包屑 Home 共用的回到根目录入口:
+//   1. 切到 files 视图
+//   2. 清掉 currentPath(顺带让依赖 currentPath 的 UI 立即反映"已在根目录")
+//   3. 直接调 History API 把 URL 改成裸 base,擦掉 ?path= / ?view= 等所有查询参数
+//   4. 仅在状态真正变化时(从 trash/pinned 过来,或已在子目录)重新拉取根目录内容
+// 不用 loadPath 改 URL——loadPath 是数据加载入口,职责单一;
+// 也不用 syncUrlFromState——它的去重比较可能把"看起来已是裸 base"或"当前 entry 就这个 URL"
+// 的边缘更新吞掉,Home 是高频点击,必须无条件把 ? 抹掉。
 function navFilesClick() {
     const wasNonFilesView = currentView !== "files";
+    const wasNotHome = currentPath !== "";
     switchToFilesView();
-    if (wasNonFilesView || currentPath !== "") {
+    currentPath = "";
+    currentRawPath = "";
+    // 部署在子路径(/cloud-drive/)时,base 是 "/cloud-drive";根部署时 base 是 ""。
+    // fallback 用 pathname 去掉 ?# 后缀,处理 __BASE_PATH__ 未注入的极端情况。
+    const base = window.__BASE_PATH__ || window.location.pathname.replace(/[?#].*$/, "");
+    try {
+        window.history.pushState({ view: "files", path: "" }, "", base);
+    } catch (e) {
+        // file:// 或权限异常下 history API 可能抛错,不影响网盘功能
+        console.warn("[navFilesClick] history.pushState 调用失败:", e);
+    }
+    if (wasNonFilesView || wasNotHome) {
         loadPath("");
     }
 }
@@ -416,6 +458,9 @@ function switchToPinnedView() {
     // pinned 视图下不需要在面包屑尾部再"固定当前目录"按钮
     document.getElementById("bcPinBtn").style.display = "none";
     clearSelection();
+    // 已固定的文件夹拥有专属 URL(?view=pinned);popstate/启动期由 navigateFromUrl 控制历史,
+    // 这里 skipWhenFromPopstate 避免重复写历史。
+    syncUrlFromState(false, { skipWhenFromPopstate: true });
     renderPinnedMain();
 }
 
@@ -428,6 +473,9 @@ function switchToTrashView() {
     // 回收站视图下固定按钮无意义，隐藏
     document.getElementById("bcPinBtn").style.display = "none";
     clearSelection();
+    // 回收站拥有专属 URL(?view=trash);popstate/启动期由 navigateFromUrl 控制历史,
+    // 这里 skipWhenFromPopstate 避免重复写历史。
+    syncUrlFromState(false, { skipWhenFromPopstate: true });
     loadTrash();
 }
 
@@ -1692,6 +1740,9 @@ async function loadPinned() {
     }
     renderPinnedSidebar();
     updatePinButton();
+    // 深链直达 ?view=pinned 时,switchToPinnedView 已先用空的 pinnedPaths 渲染过主面板;
+    // fetch 落地后若仍停留在 pinned 视图,重渲染一次以显示真实列表。
+    if (currentView === "pinned") renderPinnedMain();
 }
 
 function renderPinnedSidebar() {
@@ -2577,7 +2628,9 @@ function updateBreadcrumb() {
         return;
     }
     // event.stopPropagation() 防止点击面包屑片段时触发 path-box 的 enterPathEditMode
-    let html = `<span onclick="event.stopPropagation(); loadPath('')">Home</span>`;
+    // Home 走 navFilesClick():即使从 trash/pinned 视图跳过来也能切回 files 视图,
+    // 并把 URL 同步到裸 base(?path= / ?view= 全部剥掉)。
+    let html = `<span onclick="event.stopPropagation(); navFilesClick()">Home</span>`;
     if (currentPath) {
         const parts = currentPath.split("/");
         let cur = "";
