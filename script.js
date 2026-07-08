@@ -1983,6 +1983,10 @@ async function copyLink() {
         // 剪贴板不可用时，至少把链接显示给用户
         prompt("请手动复制以下链接（1 小时内有效一次）：", data.url);
     }
+    // 复制完成后主动让按钮失焦
+    if (document.activeElement && typeof document.activeElement.blur === "function") {
+        document.activeElement.blur();
+    }
 }
 
 let _toastTimer = null;
