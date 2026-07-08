@@ -16,6 +16,88 @@ function joinPath(parent, name) {
     return `${parent}/${cleanName}`;
 }
 
+// ================= 地址栏与 currentPath 同步 =================
+// 把"当前目录"映射到 URL 的 ?path=foo/bar 查询参数,刷新/前进/后退都能恢复。
+// 选用 query 而非 hash:更接近真实路由,刷新不依赖服务器端 fallback;
+// 选用 query 而非 path-based 路由:静态托管(GitHub Pages / Vercel 等)刷新不会 404。
+// 部署在子路径(例如 /cloud-drive/)时,所有 URL 都自动保留 __BASE_PATH__ 前缀。
+
+/**
+ * 从当前 location.search 解出 path 参数。
+ * - 返回 "" 表示根目录(URL 上不带 ?path 也算根)
+ * - 自动去掉前导 "/",匹配内部 currentPath 的表示
+ * - 拒绝包含空字符的非法值,返回 null 表示"URL 没有有效路径"
+ */
+function pathFromUrl() {
+    let raw;
+    try {
+        raw = new URLSearchParams(window.location.search).get("path");
+    } catch (_) {
+        return null;
+    }
+    if (raw === null) return null;          // URL 完全没有 ?path
+    const normalized = String(raw).replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+    if (normalized === "") return "";       // ?path= 或 ?path=/// 也视为根
+    if (/[\x00-\x1f]/.test(normalized)) return null; // 控制字符视为非法
+    return normalized;
+}
+
+/**
+ * 给定内部路径,返回应该出现在地址栏上的相对 URL(不含 origin)。
+ * 根目录为 __BASE_PATH__,子目录追加 ?path=...。
+ */
+function urlForPath(p) {
+    const base = window.__BASE_PATH__ || "";
+    const path = (p == null || p === "") ? "" : String(p);
+    return path ? `${base}?path=${encodeURIComponent(path)}` : `${base}`;
+}
+
+/**
+ * 把当前 currentPath 同步到浏览器地址栏。
+ * replace=true 用 history.replaceState(不增加历史项,启动期用);
+ * replace=false 用 history.pushState(用户每次导航都新增一项,浏览器后退能回到上一步)。
+ * 幂等:URL 已是目标时跳过,避免污染历史栈。
+ * skipWhenFromPopstate=true 时跳过自身——popstate 触发的 loadPath 不应再写历史。
+ */
+function syncUrlFromState(replace, { skipWhenFromPopstate = false } = {}) {
+    if (skipWhenFromPopstate && _popstateNavigating) return;
+    const target = urlForPath(currentPath);
+    const current =
+        window.location.pathname +
+        (window.location.search || "") +
+        (window.location.hash || "");
+    // 比较时把 pathname 末尾的 "/" 也算成"等价于空",避免外部链接尾部斜杠导致的重复条目
+    const norm = (s) => (s.endsWith("?") ? s.slice(0, -1) : s);
+    if (norm(current) === norm(target)) return;
+    try {
+        if (replace) {
+            window.history.replaceState({ path: currentPath }, "", target);
+        } else {
+            window.history.pushState({ path: currentPath }, "", target);
+        }
+    } catch (e) {
+        // 文件:// 或权限异常环境下 history API 可能抛错;不影响网盘功能
+        console.warn("[syncUrlFromState] history API 调用失败:", e);
+    }
+}
+
+/**
+ * 读取 URL 并导航。供 DOMContentLoaded 与 popstate 共用。
+ * 会在 loadPath 之前 set 一个内部标志,阻止 pushState 重入。
+ */
+let _popstateNavigating = false;
+function navigateFromUrl({ replace = false } = {}) {
+    const p = pathFromUrl();
+    if (p === null) {
+        // URL 里没有 path 参数或非法,直接显示根目录并把 URL 收拾干净
+        _popstateNavigating = true;
+        return Promise.resolve(loadPath("")).finally(() => { _popstateNavigating = false; });
+    }
+    _popstateNavigating = true;
+    if (replace) syncUrlFromState(true, { skipWhenFromPopstate: true });
+    return Promise.resolve(loadPath(p)).finally(() => { _popstateNavigating = false; });
+}
+
 // ================= 侧边栏宽度拖拽 =================
 (function setupSidebarResizer() {
     const resizer = document.getElementById("sidebarResizer");
@@ -275,11 +357,19 @@ window.addEventListener("DOMContentLoaded", () => {
         updateStorage();
         loadPinned();
         switchToFilesView();
-        loadPath("");
+        // 从 URL 恢复当前路径(刷新页面 / 直接打开分享链接时能回到原目录)。
+        // replace=true 让首次定位不增加历史项;URL 无 path 或 path 非法时,内部走 ""。
+        navigateFromUrl({ replace: true });
     } catch (e) {
         console.error("[init]", e);
         alert("页面初始化失败:" + (e && e.message ? e.message : e));
     }
+});
+
+// 浏览器前进/后退:地址栏变了但 currentPath 没变,需要重新拉取对应目录。
+// 这里不能用 pushState,否则会无限回环;由 navigateFromUrl 内部标志位保护。
+window.addEventListener("popstate", () => {
+    navigateFromUrl({ replace: false });
 });
 
 // 全局错误兜底:script 错误不再只丢到 console,屏幕也能看到
@@ -372,6 +462,10 @@ async function loadPath(path) {
     updateBreadcrumb();
     updatePinButton();
     clearSelection();
+    // 把当前目录同步到地址栏:由用户交互触发时 pushState(新增历史),
+    // 由 popstate / 启动期触发时由 navigateFromUrl 控制,这里统一 push。
+    // 状态未变化(重复 loadPath 同一路径)时由 syncUrlFromState 内部去重。
+    syncUrlFromState(false);
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/files?path=${encodeURIComponent(path)}`, {
             signal: currentListController.signal,
