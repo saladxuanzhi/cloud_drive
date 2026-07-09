@@ -23,7 +23,7 @@ Environment="TRUST_PROXY=true"
 # CORS 白名单(没有跨域需求可留空)
 # Environment="ALLOWED_ORIGINS=https://drive.realxuanzhi.top"
 
-# 业务调优(可选)
+# 业务调优
 Environment="MAX_UPLOAD_SIZE=10737418240"
 Environment="RATE_LIMIT_UPLOAD_PER_MIN=30"
 Environment="RATE_LIMIT_TICKET_PER_MIN=60"

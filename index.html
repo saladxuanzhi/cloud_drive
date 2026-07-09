@@ -86,6 +86,17 @@
             回收站
         </div>
 
+        <!-- 回主页 -->
+        <a class="nav-item nav-item-link" id="navHome" href="https://www.realxuanzhi.top/index" target="_blank" rel="noopener noreferrer">
+            <span class="nav-expander"><svg width="20" height="20" viewBox="0 0 20 20" focusable="false"></svg></span>
+            <span class="nav-icon-stack">
+                <svg viewBox="-1 -1 18 18" width="24" height="24" fill="currentColor" focusable="false">
+                    <path d="M5.22 14.78a.75.75 0 0 0 1.06-1.06L4.56 12h8.69a.75.75 0 0 0 0-1.5H4.56l1.72-1.72a.75.75 0 0 0-1.06-1.06l-3 3a.75.75 0 0 0 0 1.06l3 3Zm5.56-6.5a.75.75 0 1 1-1.06-1.06l1.72-1.72H2.75a.75.75 0 0 1 0-1.5h8.69L9.72 2.28a.75.75 0 0 1 1.06-1.06l3 3a.75.75 0 0 1 0 1.06l-3 3Z"/>
+                </svg>
+            </span>
+            回主页
+        </a>
+
         <!-- 退出登录: href="/logout" 是 origin-absolute 路径, 不会受 BASE_PATH 影响 -->
         <a class="nav-item nav-item-link" id="navLogout" href="/logout">
             <span class="nav-expander"><svg width="20" height="20" viewBox="0 0 20 20" focusable="false"></svg></span>
@@ -107,15 +118,14 @@
         </div>
     </div>
 
-    <!-- 侧边栏拖拽把手：分隔线默认透明，可左右拖动调整 sidebar 宽度 -->
+    <!-- 侧边栏拖拽把手：可左右拖动调整 sidebar 宽度 -->
     <div class="sidebar-resizer" id="sidebarResizer" role="separator" aria-orientation="vertical" aria-label="拖动调整侧边栏宽度"></div>
 
-    <!-- 主区域：垂直堆叠顶部工具栏 + 主容器卡片 -->
     <div class="main-area">
         <!-- 顶部工具栏：路径 + 大头针 + 搜索 -->
         <div class="top-bar">
             <div class="explorer-toolbar">
-                <!-- 1. 路径显示与编辑区域：点击空白处进入编辑模式 -->
+                <!-- 路径显示与编辑区域：点击空白处进入编辑模式 -->
                 <div class="path-box" id="pathBox" onclick="enterPathEditMode()">
                     <div class="breadcrumb" id="breadcrumb">
                         <span onclick="event.stopPropagation(); navFilesClick()">Home</span>
@@ -126,12 +136,12 @@
                            style="display: none;">
                 </div>
 
-                <!-- 2. 大头针按钮（路径与搜索之间） -->
+                <!-- 大头针按钮（路径与搜索之间） -->
                 <button class="bc-pin-btn" id="bcPinBtn" onclick="togglePinCurrentPath()" data-tooltip="固定当前位置" aria-label="固定当前位置">
                     <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
                 </button>
 
-                <!-- 3. 搜索框：放大镜在右侧 -->
+                <!-- 搜索框 -->
                 <div class="search-box">
                     <input type="text" id="searchInput" oninput="handleSearch()" placeholder="在当前目录中搜索...">
                     <svg data-tooltip="搜索" height="24" viewBox="0 0 24 24" width="24" fill="#444746"><path d="M20.49,19l-5.73-5.73C15.53,12.2,16,10.91,16,9.5C16,5.91,13.09,3,9.5,3S3,5.91,3,9.5C3,13.09,5.91,16,9.5,16 c1.41,0,2.7-0.47,3.77-1.24L19,20.49L20.49,19z M5,9.5C5,7.01,7.01,5,9.5,5S14,7.01,14,9.5S11.99,14,9.5,14S5,11.99,5,9.5z"/></svg>
@@ -140,7 +150,7 @@
 
             <!-- 多选操作条：覆盖在 top-bar 之上，激活时 top-bar 渐隐、自身渐显 -->
             <div class="selection-bar" id="selectionBar" aria-hidden="true">
-                <!-- 1. 清除选择 与 数量文本 -->
+                <!-- 清除选择 与 数量文本 -->
                 <div class="sel-left">
                     <button class="sel-icon-btn" onclick="clearSelection()" data-tooltip="清除选择" aria-label="清除选择">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="#444746"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
@@ -148,7 +158,7 @@
                     <span class="sel-text" id="selectCount">已选择 0 项内容</span>
                 </div>
 
-                <!-- 2. 操作图标 (紧贴左侧文本) -->
+                <!-- 操作图标 (紧贴左侧文本) -->
                 <div class="sel-actions">
                     <button class="sel-icon-btn" id="selDownload" onclick="bulkDownload()" data-tooltip="下载" aria-label="下载">
                         <svg height="20" width="20" viewBox="0 96 960 960" fill="#444746"><path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"/></svg>
