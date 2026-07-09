@@ -16,6 +16,60 @@ function joinPath(parent, name) {
     return `${parent}/${cleanName}`;
 }
 
+// ================= URL 路径 Base64 编码 =================
+// 用 ?path=b64:<...> 替代 ?path=<percent-encoded>,避免中文路径在地址栏上
+// 变成超长 %xx 序列。新写入的 URL 一律带 b64: 前缀;读取时遇到 b64: 走
+// Base64 解码,否则回退到 decodeURIComponent(旧链接平滑兼容)。
+// 服务端所有 API 仍接收原始 path 字符串,前端在调用 API 前完成解码。
+// 前缀用 "b64:" 是安全的:_validate_basename 禁止 : 作为文件名一部分。
+
+/**
+ * 把任意 Unicode path 编码为 URL-safe Base64(无 padding)。
+ * 返回值形如 "b64:L29"  其中 ":" 后是 base64url 字符集 [A-Za-z0-9_-]。
+ */
+function encodePathForUrl(path) {
+    if (!path) return "";
+    try {
+        // TextEncoder → 二进制字符串 → btoa,得到 UTF-8 安全的 Base64
+        const bytes = new TextEncoder().encode(String(path));
+        let bin = "";
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        const b64 = btoa(bin);
+        // 转 URL-safe 字符集,移除 padding(= 在 URL 里需要再编码,不优雅)
+        const urlSafe = b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+        return "b64:" + urlSafe;
+    } catch (_) {
+        // 极端情况(TextEncoder 不可用等):回退到 percent-encode,避免阻塞
+        try { return "b64:" + btoa(unescape(encodeURIComponent(String(path)))); }
+        catch (_) { return ""; }
+    }
+}
+
+/**
+ * 解码 ?path= 的原始值:识别 b64: 前缀走 Base64,否则按 legacy percent-encoded 处理。
+ * 失败一律返回 ""(等同于根目录),不让坏 URL 阻塞页面初始化。
+ */
+function decodePathFromUrl(raw) {
+    if (raw == null || raw === "") return "";
+    if (typeof raw !== "string") return "";
+    if (raw.startsWith("b64:")) {
+        try {
+            let b64 = raw.slice(4).replace(/-/g, "+").replace(/_/g, "/");
+            // 补回缺失的 padding(atob 要求长度是 4 的倍数)
+            const pad = b64.length % 4;
+            if (pad) b64 += "=".repeat(4 - pad);
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return new TextDecoder().decode(bytes);
+        } catch (_) {
+            return "";
+        }
+    }
+    // legacy:旧分享链接或外部粘贴仍是 %E4%B8%AD... 形式
+    try { return decodeURIComponent(raw); } catch (_) { return ""; }
+}
+
 // ================= 地址栏与 currentPath 同步 =================
 // 把"当前目录"映射到 URL 的 ?path=foo/bar 查询参数,刷新/前进/后退都能恢复。
 // 选用 query 而非 hash:更接近真实路由,刷新不依赖服务器端 fallback;
@@ -27,9 +81,10 @@ function joinPath(parent, name) {
  * 返回 { view, path }:
  *   - ?view=trash  → { view: "trash",  path: "" }        回收站
  *   - ?view=pinned → { view: "pinned", path: "" }        已固定的文件夹
- *   - ?path=foo/bar→ { view: "files",  path: "foo/bar" } 文件视图子目录
+ *   - ?path=b64:.. 或 ?path=foo/bar → { view: "files", path: "<解码后>" } 文件视图子目录
  *   - 其它(含无参数 / 非法值)→ { view: "files", path: "" } 主目录
  * 说明:主目录、回收站、已固定的文件夹各自拥有专属 URL,刷新/前进/后退都能恢复。
+ *       path 参数的编码方式详见 encodePathForUrl/decodePathFromUrl。
  */
 function stateFromUrl() {
     let params;
@@ -44,7 +99,10 @@ function stateFromUrl() {
 
     const raw = params.get("path");
     if (raw === null) return { view: "files", path: "" };          // 无 ?path,视为主目录
-    const normalized = String(raw).replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+    // 先解码(b64: 前缀或旧 percent-encoded),再做安全归一化
+    const decoded = decodePathFromUrl(raw);
+    if (decoded === "") return { view: "files", path: "" };       // 解码失败/空串视为根
+    const normalized = String(decoded).replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
     if (normalized === "") return { view: "files", path: "" };     // ?path= 或 ?path=/// 也视为根
     if (/[\x00-\x1f]/.test(normalized)) return { view: "files", path: "" }; // 控制字符视为非法
     return { view: "files", path: normalized };
@@ -55,14 +113,17 @@ function stateFromUrl() {
  *   - 回收站            → __BASE_PATH__ + "?view=trash"
  *   - 已固定的文件夹     → __BASE_PATH__ + "?view=pinned"
  *   - 主目录            → __BASE_PATH__
- *   - 文件视图子目录     → __BASE_PATH__ + "?path=..."
+ *   - 文件视图子目录     → __BASE_PATH__ + "?path=b64:..."
+ *
+ * 使用 Base64 URL-Safe 编码(详见 encodePathForUrl),避免中文/特殊字符被
+ * percent-encoded 成一长串 %xx,既不美观也容易触顶 URL 长度限制。
  */
 function urlForState() {
     const base = window.__BASE_PATH__ || "";
     if (currentView === "trash") return `${base}?view=trash`;
     if (currentView === "pinned") return `${base}?view=pinned`;
     const path = (currentPath == null || currentPath === "") ? "" : String(currentPath);
-    return path ? `${base}?path=${encodeURIComponent(path)}` : `${base}`;
+    return path ? `${base}?path=${encodePathForUrl(path)}` : `${base}`;
 }
 
 /**
@@ -1292,8 +1353,30 @@ document.addEventListener("DOMContentLoaded", () => {
 document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && e.target.tagName !== "INPUT") {
         clearSelection();
+        // 顺手关掉面包屑省略号下拉,保持 ESC 语义统一
+        if (_bcDropdownEl) closeBreadcrumbDropdown();
     }
 });
+
+/**
+ * 点击空白处关闭面包屑省略号下拉:
+ * 排除 trigger 本身(由 toggleBreadcrumbDropdown 处理)和下拉内部(菜单项自己处理)。
+ * 与现有的「点击空白处取消选择」逻辑分开,这里只针对面包屑下拉。
+ */
+document.addEventListener("mousedown", (e) => {
+    if (!_bcDropdownEl) return;
+    const t = e.target;
+    if (_bcDropdownTrigger && t === _bcDropdownTrigger) return;
+    if (t.closest && t.closest(".bc-ellipsis-dropdown")) return;
+    closeBreadcrumbDropdown();
+});
+document.addEventListener("touchstart", (e) => {
+    if (!_bcDropdownEl) return;
+    const t = e.target;
+    if (_bcDropdownTrigger && t === _bcDropdownTrigger) return;
+    if (t.closest && t.closest(".bc-ellipsis-dropdown")) return;
+    closeBreadcrumbDropdown();
+}, { passive: true });
 
 /**
  * Ctrl/Cmd + A：选中当前文件列表中所有可见条目。
@@ -2836,7 +2919,10 @@ function updateBreadcrumb() {
             cur += (cur ? "/" : "") + p;
             const isLast = idx === parts.length - 1;
             const cls = isLast ? ' class="bc-current"' : "";
-            html += `<span class="separator"><svg class="a-s-fa-Ha-pa c-qd" width="24" height="24" viewBox="0 0 24 24" focusable="false" fill="rgb(116,119,117)"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path></svg></span><span${cls} onclick="event.stopPropagation(); loadPath('${escapeAttr(cur)}')" title="${escapeAttr(p)}">${escapeHtml(p)}</span>`;
+            // 非末段挂 data-path,truncateBreadcrumb 隐藏后能凭此还原出 path,
+            // 供省略号下拉菜单做"点击跳转回该目录"。
+            const dataPath = isLast ? "" : ` data-path="${escapeAttr(cur)}"`;
+            html += `<span class="separator"><svg class="a-s-fa-Ha-pa c-qd" width="24" height="24" viewBox="0 0 24 24" focusable="false" fill="rgb(116,119,117)"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path></svg></span><span${cls}${dataPath} onclick="event.stopPropagation(); loadPath('${escapeAttr(cur)}')" title="${escapeAttr(p)}">${escapeHtml(p)}</span>`;
         });
     }
     bc.innerHTML = html;
@@ -2852,13 +2938,23 @@ function updateBreadcrumb() {
  *   - 插入省略号后再检查一次溢出,必要时继续隐藏(省略号本身有宽度)
  *   - 若仍溢出(说明 bc-current 单段就已经超过 path-box),用二分查找直接裁短文本
  * 触发时机:updateBreadcrumb 末尾 / 退出编辑模式 / window resize / 跨断点切换
+ *
+ * 副作用:把本轮被隐藏的中间段 [{name, path}, ...] 写入模块级 _hiddenSegments,
+ * 顺序按"被隐藏的先后" = 从浅到深。省略号下拉菜单在使用时需 reverse() 得到
+ * 从深到浅的展示顺序。
  */
+let _hiddenSegments = [];  // 被隐藏的中间段元数据,供 bc-ellipsis 下拉菜单使用
 function truncateBreadcrumb() {
     const breadcrumb = document.getElementById("breadcrumb");
     const pathBox = document.getElementById("pathBox");
     if (!breadcrumb || !pathBox) return;
     if (pathBox.classList.contains("is-editing")) return;
     if (currentView !== "files") return;
+
+    // 关闭可能残留的下拉菜单,旧引用会随 truncate 失效
+    closeBreadcrumbDropdown();
+    // 清掉本轮隐藏段列表,后面 hideLeftmostMidPair 会重新填充
+    _hiddenSegments = [];
 
     // 清掉上次插入的省略号 + 占位 separator,恢复子项显示,并把 bc-current 还原成完整文本
     breadcrumb.querySelectorAll(".bc-ellipsis, .separator.is-inserted").forEach((el) => el.remove());
@@ -2894,6 +2990,12 @@ function truncateBreadcrumb() {
             if (child.style.display === "none") continue;
             children[i - 1].style.display = "none";
             child.style.display = "none";
+            // 记录被隐藏的中间段:name 是该段中文名,path 是从根到该段的完整相对路径
+            // 顺序 = "被隐藏的先后" = 从浅到深(A→B→C),下拉菜单展示时需 reverse
+            _hiddenSegments.push({
+                name: child.textContent || "",
+                path: child.getAttribute("data-path") || "",
+            });
             return true;
         }
         return false;
@@ -2922,7 +3024,21 @@ function truncateBreadcrumb() {
         const ell = document.createElement("span");
         ell.className = "bc-ellipsis";
         ell.textContent = "…";
-        ell.setAttribute("aria-hidden", "true");
+        ell.setAttribute("role", "button");
+        ell.setAttribute("aria-label", "显示被隐藏的中间目录");
+        ell.setAttribute("aria-haspopup", "menu");
+        ell.setAttribute("aria-expanded", "false");
+        ell.setAttribute("tabindex", "0");
+        ell.addEventListener("click", (e) => {
+            e.stopPropagation();
+            toggleBreadcrumbDropdown(ell);
+        });
+        ell.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                toggleBreadcrumbDropdown(ell);
+            }
+        });
         children[0].after(sep);
         sep.after(ell);
     }
@@ -2969,6 +3085,150 @@ function trimBcCurrentToFit(breadcrumb, bcCurrent, isOverflowing) {
         }
     }
     bcCurrent.textContent = lo > 0 ? fullText.slice(0, lo) + "…" : "…";
+}
+
+// ================= 面包屑省略号：下拉菜单 =================
+// 当中间段被 truncateBreadcrumb 隐藏时,点击省略号会弹出菜单,按"从深到浅"的
+// 顺序列出所有被隐藏的目录,点击任一项直接调 loadPath 跳转(走与现有路径导航
+// 完全一致的路由逻辑:history.pushState + 后端拉取 + 面包屑重渲染)。
+
+let _bcDropdownEl = null;     // 当前已挂载的下拉 DOM(单例,避免重复创建)
+let _bcDropdownTrigger = null; // 触发该下拉的 .bc-ellipsis,用于 close 时同步 aria-expanded
+
+/**
+ * 切换省略号下拉:已开则关,未开则开。
+ * 同时维护 aria-expanded,与全局点击关闭逻辑配合。
+ */
+function toggleBreadcrumbDropdown(triggerEl) {
+    if (_bcDropdownEl && triggerEl && triggerEl === _bcDropdownTrigger) {
+        closeBreadcrumbDropdown();
+        return;
+    }
+    // 已有别的实例(理论上 truncateBreadcrumb 已 close 过,这里兜底)
+    if (_bcDropdownEl) closeBreadcrumbDropdown();
+    openBreadcrumbDropdown(triggerEl);
+}
+
+/**
+ * 真正创建并定位下拉菜单:
+ *   - 菜单内容 = _hiddenSegments 的反转(从深到浅)
+ *   - 定位策略:absolute 相对 .path-box;优先放在省略号正下方,空间不足则翻到上方
+ *   - 横向夹紧到 .path-box 范围内,离边缘留 4px 余量
+ */
+function openBreadcrumbDropdown(triggerEl) {
+    if (!triggerEl) return;
+    if (!_hiddenSegments || _hiddenSegments.length === 0) return;
+
+    const pathBox = document.getElementById("pathBox");
+    if (!pathBox) return;
+
+    // 菜单:绝对定位,挂在 pathBox 下而非 breadcrumb,避免被 breadcrumb 的 overflow:hidden 裁掉
+    const menu = document.createElement("div");
+    menu.className = "bc-ellipsis-dropdown";
+    menu.setAttribute("role", "menu");
+
+    // 反转 _hiddenSegments:truncate 顺序是 A→B→C (A最浅),展示要求是从深到浅,即 C→B→A
+    const reversed = _hiddenSegments.slice().reverse();
+    reversed.forEach((seg, idx) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "bc-ellipsis-dropdown-item";
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("data-path", seg.path || "");
+        item.setAttribute("title", seg.path || seg.name || "");
+        // 路径过长时截短显示,完整路径放 title 提示
+        const displayName = seg.name || seg.path || "(未命名)";
+        item.innerHTML = `
+            <svg class="bc-dd-icon" width="18" height="18" viewBox="0 0 24 24" focusable="false" fill="currentColor">
+                <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+            </svg>
+            <span class="bc-dd-name">${escapeHtml(displayName)}</span>
+        `;
+        item.addEventListener("click", (e) => {
+            e.stopPropagation();
+            navigateToBreadcrumbSegment(seg.path);
+        });
+        menu.appendChild(item);
+    });
+
+    // 挂到 pathBox 里(pathBox 本身需 position:relative,见 CSS)
+    pathBox.appendChild(menu);
+    _bcDropdownEl = menu;
+    _bcDropdownTrigger = triggerEl;
+    triggerEl.setAttribute("aria-expanded", "true");
+    triggerEl.classList.add("is-open");
+
+    // 定位:获取 trigger 与 pathBox 的位置,优先放在 trigger 正下方,溢出翻到上方
+    positionBreadcrumbDropdown(triggerEl, menu);
+
+    // 入场动画(下一帧加 class 触发 transition)
+    requestAnimationFrame(() => menu.classList.add("visible"));
+}
+
+/**
+ * 定位下拉菜单:相对 path-box 坐标,把菜单放到省略号正下方。
+ * 若下方空间不够则翻到上方;横向夹紧到 pathBox 内。
+ */
+function positionBreadcrumbDropdown(triggerEl, menu) {
+    const pathBox = document.getElementById("pathBox");
+    if (!pathBox || !triggerEl || !menu) return;
+    const pbRect = pathBox.getBoundingClientRect();
+    const trRect = triggerEl.getBoundingClientRect();
+
+    // 先以 visible 内容拿到高度(menu 此时还未 visible,需先短暂显示测量)
+    const prevVisibility = menu.style.visibility;
+    menu.style.visibility = "hidden";
+    menu.classList.add("visible"); // 强制可视以取尺寸
+    const menuRect = menu.getBoundingClientRect();
+    menu.classList.remove("visible");
+    menu.style.visibility = prevVisibility;
+
+    const GAP = 4;
+    const PAD = 4;  // 离 path-box 边缘留 4px
+
+    // 相对 pathBox 的坐标
+    let top = trRect.bottom - pbRect.top + GAP;
+    const spaceBelow = pbRect.bottom - trRect.bottom;
+    if (spaceBelow < menuRect.height + GAP + PAD && trRect.top - pbRect.top > menuRect.height + GAP + PAD) {
+        // 翻到上方
+        top = trRect.top - pbRect.top - menuRect.height - GAP;
+    }
+    let left = trRect.left - pbRect.left;
+    const maxLeft = pbRect.width - menuRect.width - PAD;
+    if (left > maxLeft) left = Math.max(PAD, maxLeft);
+    if (left < PAD) left = PAD;
+
+    menu.style.top = `${top}px`;
+    menu.style.left = `${left}px`;
+    menu.style.maxWidth = `${pbRect.width - PAD * 2}px`;
+}
+
+/**
+ * 关闭下拉:恢复 aria-expanded、清理 DOM、解绑 trigger 上的 is-open 标记。
+ * 幂等,反复调用安全。
+ */
+function closeBreadcrumbDropdown() {
+    if (_bcDropdownEl) {
+        _bcDropdownEl.remove();
+        _bcDropdownEl = null;
+    }
+    if (_bcDropdownTrigger) {
+        _bcDropdownTrigger.setAttribute("aria-expanded", "false");
+        _bcDropdownTrigger.classList.remove("is-open");
+        _bcDropdownTrigger = null;
+    }
+}
+
+/**
+ * 点击下拉菜单项:关闭菜单,然后调 loadPath(path) 跳转。
+ * loadPath 内部已经会处理 history.pushState + 后端拉取 + 面包屑重渲染,
+ * 与用户手动点击面包屑中段 / 双击文件夹行的体验完全一致。
+ */
+function navigateToBreadcrumbSegment(path) {
+    closeBreadcrumbDropdown();
+    if (!path) return;
+    // 与面包屑非末段 click / 双击文件夹行走的同一条路径
+    loadPath(path);
 }
 
 // ================= 路径框：点击空白处进入"地址栏编辑"模式 =================

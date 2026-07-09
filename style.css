@@ -258,7 +258,8 @@ body.has-selection .top-bar > .explorer-toolbar {
     min-width: 0;
 }
 
-/* path-box:胶囊圆角,占满 path-row 剩余空间,内部单行展示面包屑 */
+/* path-box:胶囊圆角,占满 path-row 剩余空间,内部单行展示面包屑。
+   position: relative 是省略号下拉菜单(.bc-ellipsis-dropdown)的定位上下文。 */
 .path-box {
     flex: 1;
     min-width: 0;
@@ -272,9 +273,9 @@ body.has-selection .top-bar > .explorer-toolbar {
     cursor: text;
     transition: background-color 0.18s ease, border-color 0.18s ease,
                 box-shadow 0.18s ease;
-    overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
+    position: relative;
 }
 
 /* 编辑模式:主题色边框 + 文字可选 */
@@ -354,17 +355,124 @@ body:not([data-view="files"]) .path-box:hover {
     color: #b0b4ba;
 }
 
-/* 路径溢出时的省略号占位:不可点击,提示存在被省略的层级 */
+/* 路径溢出时的省略号占位:
+   - 默认态:cursor pointer,hover 给胶囊背景 + 文本变主色,提示可点击
+   - is-open:展开下拉时背景保持 active 态,告诉用户"这里就是触发器"
+   - focus-visible:键盘可达,描边做无障碍提示 */
 .breadcrumb .bc-ellipsis {
-    cursor: default;
-    pointer-events: none;
+    cursor: pointer;
     color: var(--text-muted);
-    padding: 3px 4px;
+    padding: 3px 6px;
+    border-radius: 12px;
+    transition: background-color 0.15s ease, color 0.15s ease;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 .breadcrumb .bc-ellipsis:hover {
+    background: var(--hover-bg);
+    color: var(--primary);
+}
+
+.breadcrumb .bc-ellipsis.is-open {
+    background: var(--hover-bg);
+    color: var(--primary);
+}
+
+.breadcrumb .bc-ellipsis:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 1px;
+}
+
+/* ====== 面包屑省略号下拉菜单 ======
+   - 极简白底 + 圆角 + 阴影 + 淡入动画,贴合整体扁平风格
+   - 触控友好:每项高度 ~36px,移动端再放大到 44px
+   - 文本溢出用 ellipsis 截短,完整路径通过 title 展示 */
+.bc-ellipsis-dropdown {
+    position: absolute;
+    z-index: 1500;
+    min-width: 160px;
+    max-width: 360px;
+    max-height: 320px;
+    overflow-y: auto;
+    background: #ffffff;
+    border-radius: 8px;
+    box-shadow:
+        0 4px 12px rgba(0, 0, 0, 0.12),
+        0 1px 3px rgba(0, 0, 0, 0.08);
+    padding: 4px 0;
+    /* 默认隐藏(配合 JS 用 rAF 加 .visible 触发淡入) */
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity 0.15s ease, transform 0.15s ease;
+    pointer-events: none;  /* 隐藏期间不接收事件,避免误触 */
+}
+
+.bc-ellipsis-dropdown.visible {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+.bc-ellipsis-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 14px;
+    border: none;
     background: transparent;
+    color: var(--text-main);
+    font-size: 14px;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.12s ease;
+    /* 触控友好最小尺寸,移动端再放大 */
+    min-height: 36px;
+    font-family: inherit;
+}
+
+.bc-ellipsis-dropdown-item:hover,
+.bc-ellipsis-dropdown-item:focus-visible {
+    background: var(--hover-bg);
+    outline: none;
+}
+
+.bc-ellipsis-dropdown-item .bc-dd-icon {
+    flex-shrink: 0;
     color: var(--text-muted);
+}
+
+.bc-ellipsis-dropdown-item .bc-dd-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 移动端:加大点击区域,避免误触 */
+body.is-mobile .bc-ellipsis-dropdown-item {
+    min-height: 44px;
+    font-size: 15px;
+    padding: 10px 16px;
+}
+
+/* 暗色主题适配(若后续启用):简单翻转即可 */
+@media (prefers-color-scheme: dark) {
+    .bc-ellipsis-dropdown {
+        background: #2d2e31;
+        box-shadow:
+            0 4px 12px rgba(0, 0, 0, 0.4),
+            0 1px 3px rgba(0, 0, 0, 0.25);
+    }
+    .bc-ellipsis-dropdown-item {
+        color: #e8eaed;
+    }
+    .bc-ellipsis-dropdown-item .bc-dd-icon {
+        color: #9aa0a6;
+    }
 }
 
 /* 当前段(最后一段目录/文件名):唯一允许收缩的元素,
