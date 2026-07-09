@@ -914,20 +914,34 @@ const DBLCLICK_WINDOW_MS = 1000;
 let _lastClickTs = 0;
 let _lastClickIndex = -1;
 
-function _attachDblclickHandler(tr, index, action) {
-    // 单独监听 click(不覆盖 tr.onclick 的选中逻辑),做 1s 窗口的双击判定。
-    // 两次 click 都各自跑 tr.onclick(选中),第二次命中 1s 窗口时再额外触发 action。
-    tr.addEventListener("click", () => {
+function _attachDblclickHandler(tr, index, action, clearSel = false) {
+    // 单一 click 监听,同时承担:
+    //   - 单击 → handleRowClick(选中 / 多选,与原 tr.onclick 等价)
+    //   - 双击(同 index、1s 窗口内)→ action() + 可选 clearSelection()
+    //
+    // 这样设计是因为原来拆成两个监听器会撞上执行顺序问题:
+    //   1) dblclick 监听器先跑 → loadPath 内部 clearSelection
+    //   2) tr.onclick 后跑   → handleRowClick 重新选中该行
+    // 把两个职责合并到一个监听器后,双击分支 return 不再走 handleRowClick,
+    // 自然避免了「清完又被选回去」的竞态。
+    //
+    // clearSel=true:进入新目录(loadPath/openPinnedItem)时,旧 selectedItems
+    //   指向旧目录的 items,新目录里已经无意义,清掉。
+    // clearSel=false:预览文件(previewFile)时目录没变,选择保留。
+    tr.addEventListener("click", (e) => {
         const now = Date.now();
-        if (_lastClickIndex === index && (now - _lastClickTs) <= DBLCLICK_WINDOW_MS) {
-            // 命中双击:消耗掉这次窗口,避免后面第三次点击继续误触发
+        const isDbl = (_lastClickIndex === index) && (now - _lastClickTs) <= DBLCLICK_WINDOW_MS;
+        if (isDbl) {
             _lastClickTs = 0;
             _lastClickIndex = -1;
             action();
-            return;
+            if (clearSel) clearSelection();
+            return;  // 双击分支:不再走 handleRowClick,避免重新选中
         }
+        // 单击:更新时间戳 + 走原选中逻辑
         _lastClickTs = now;
         _lastClickIndex = index;
+        handleRowClick(e, index);
     });
 }
 
@@ -940,15 +954,18 @@ function _buildTableRow(item, index) {
     if (currentView === "files" && !item.is_dir) {
         const previewKind = canPreview(item, ext);
         if (previewKind) {
-            _attachDblclickHandler(tr, index, () => previewFile(item, previewKind));
+            // 文件预览不动目录,选择保留
+            _attachDblclickHandler(tr, index, () => previewFile(item, previewKind), false);
             tr.style.cursor = "pointer";
         }
     }
     if (currentView === "files" && item.is_dir) {
-        _attachDblclickHandler(tr, index, () => loadPath(joinPath(currentPath, item.name)));
+        // 进入子目录 → 旧选择已经无意义,清掉
+        _attachDblclickHandler(tr, index, () => loadPath(joinPath(currentPath, item.name)), true);
     }
     if (currentView === "pinned") {
-        _attachDblclickHandler(tr, index, () => openPinnedItem(index));
+        // 从已固定的文件夹进入 → 同理清掉选择
+        _attachDblclickHandler(tr, index, () => openPinnedItem(index), true);
         tr.style.cursor = "pointer";
     }
 
@@ -1018,7 +1035,9 @@ function _buildTableRow(item, index) {
         ${metaCells}
         ${actionCell}
     `;
-    tr.onclick = (e) => handleRowClick(e, index);
+    // 注意:不在这里设 tr.onclick。
+    // 单击/双击统一由上面 _attachDblclickHandler 里注册的唯一 click 监听器处理,
+    // 否则会出现「dblclick 监听器清选 → onclick 又选回去」的竞态(详见函数注释)。
     return tr;
 }
 
