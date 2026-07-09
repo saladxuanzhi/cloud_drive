@@ -13,6 +13,7 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -49,7 +50,7 @@ FOLDER_DOWNLOAD_LIMIT = int(os.getenv("FOLDER_DOWNLOAD_LIMIT", str(200 * 1024 * 
 TEXT_PREVIEW_LIMIT = int(os.getenv("TEXT_PREVIEW_LIMIT", str(2 * 1024 * 1024)))         # 2MB
 IMAGE_PREVIEW_LIMIT = int(os.getenv("IMAGE_PREVIEW_LIMIT", str(50 * 1024 * 1024)))       # 50MB
 BINARY_SNIFF_BYTES = 8 * 1024
-MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", str(10 * 1024 * 1024 * 1024)))       # 10GB/文件
+MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", str(1 * 1024 * 1024 * 1024)))        # 1GB/文件
 UPLOAD_CHUNK_SIZE = 32 * 1024
 
 # 限流阈值(按 IP 滑动窗口)
@@ -92,7 +93,7 @@ _TEXT_EXTS = {
     # 代码
     "js", "jsx", "ts", "tsx", "mjs", "cjs",
     "py", "java", "kt", "scala", "groovy",
-    "c", "h", "cpp", "cc", "cxx", "hpp", "hh",
+    "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "cs",
     "go", "rs", "swift", "m", "mm", "rb", "php",
     "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
     "sql", "lua", "pl", "r", "dart", "vue", "svelte",
@@ -197,18 +198,27 @@ _audit_handler = RotatingFileHandler(
 _audit_handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
 audit_logger.addHandler(_audit_handler)
 
-# 错误日志:未捕获异常等
+# 错误日志:未捕获异常、参数校验失败、multipart 解析失败等
+# 同时输出到:
+#   1. error.log(滚动文件,保留排查现场)
+#   2. stderr(systemd 的 StandardError=journal 会收,`journalctl -u cloud_drive` 直接看)
+# 这样上游异常即使没进 error.log 也能在 journalctl 里看到。
 error_logger = logging.getLogger("cloud_drive.error")
 error_logger.setLevel(logging.WARNING)
 error_logger.propagate = False
-_err_handler = RotatingFileHandler(
+_err_file_handler = RotatingFileHandler(
     os.path.join(LOG_DIR, "error.log"),
     maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
 )
-_err_handler.setFormatter(
+_err_file_handler.setFormatter(
     logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 )
-error_logger.addHandler(_err_handler)
+error_logger.addHandler(_err_file_handler)
+_err_stderr_handler = logging.StreamHandler(_sys.stderr)
+_err_stderr_handler.setFormatter(
+    logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+)
+error_logger.addHandler(_err_stderr_handler)
 
 
 def _client_ip(request: Request) -> str:
@@ -224,18 +234,13 @@ def _client_ip(request: Request) -> str:
     return (request.client.host if request.client else "-") or "-"
 
 
-def _ua(request: Request) -> str:
-    ua = request.headers.get("user-agent", "-")
-    return ua[:200] if ua else "-"
-
-
 def log_audit(event: str, request: Request = None, **details) -> None:
     """写一条审计日志。所有用户态关键操作都应调用。
-    格式: ISO 时间戳 | event | ip=<ip> | ua=<ua> | k=v k=v ..."""
+    格式: ISO 时间戳 | event | ip=<ip> | k=v k=v ...
+    注: 已取消 ua(User-Agent)字段 —— UA 经常很长且对审计价值不大。"""
     parts = [event]
     if request is not None:
         parts.append(f"ip={_client_ip(request)}")
-        parts.append(f"ua={_ua(request)}")
     for k, v in details.items():
         # 截断过长的字段,避免日志膨胀
         sv = str(v)
@@ -380,6 +385,40 @@ async def reject_oversize_request(request: Request, call_next):
                 },
             )
     return await call_next(request)
+
+
+# ================= 全局异常处理器 =================
+# FastAPI 默认会把 RequestValidationError 转成 422 但不写日志,
+# python-multipart 解析 multipart 失败(如单 part >1MB)就走这条路径,
+# 结果就是客户端看到 4xx / nginx 看到异常断开,但 error.log / journalctl 全是空的。
+# 这里显式接管,把堆栈打进 error_logger(同时进 error.log 和 stderr -> journalctl)。
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # exc.errors() 可能很长(包含整个 body 的描述),截断避免日志爆掉
+    err_summary = str(exc.errors())
+    if len(err_summary) > 1000:
+        err_summary = err_summary[:1000] + "...(truncated)"
+    error_logger.warning(
+        "请求验证失败: %s %s client_ip=%s errors=%s",
+        request.method, request.url.path, _client_ip(request), err_summary,
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"error": "validation_error"},
+    )
+
+
+# 兜底:任何没被业务层接住的异常都打完整堆栈,避免 nginx 看到空响应后吐 500。
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    error_logger.exception(
+        "FastAPI 层未捕获异常: %s %s client_ip=%s",
+        request.method, request.url.path, _client_ip(request),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal_server_error"},
+    )
 
 
 # 内存下载凭证表 {ticket_id: {...}}
@@ -1191,6 +1230,19 @@ async def upload_file(
 
 if __name__ == "__main__":
     import uvicorn
-    # 绑定 127.0.0.1(由 Nginx 反代对外),如需直连请用 0.0.0.0 + 防火墙
-    # 只保留应用自身 logger(启动/错误)的输出。
-    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
+    import logging
+    # 启动前先把根 logger 配到 stderr:
+    #   - uvicorn 自身的 warning/error 默认 propagate 到根 logger,
+    #     走这里就能进 systemd 的 StandardError=journal。
+    #   - 排查阶段想看更细的栈,把 level 改成 DEBUG 即可。
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        stream=_sys.stderr,
+    )
+    # 绑定 0.0.0.0(由 Nginx 反代到 127.0.0.1:8000 上去)
+    # log_level="info" 让 multipart 解析失败、客户端断连等也能进 stderr -> journalctl
+    uvicorn.run(
+        app, host="0.0.0.0", port=8000,
+        log_level="info", access_log=False,
+    )
