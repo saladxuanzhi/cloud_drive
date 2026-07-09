@@ -2028,6 +2028,23 @@ body.is-mobile .drop-overlay svg {
     max-width: 80vw;
 }
 
+.mobile-action-sheet-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    padding: 6px;
+    margin: -6px;            /* 抵消 padding，保持视觉对齐，又给手指留足触控区 */
+    cursor: pointer;
+    color: var(--text-muted);
+    border-radius: 50%;
+    line-height: 1;
+}
+.mobile-action-sheet-close:active {
+    background: rgba(0, 0, 0, 0.08);
+}
+
 .mobile-action-sheet-item {
     display: flex;
     align-items: center;

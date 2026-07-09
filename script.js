@@ -353,6 +353,12 @@ async function renderIcons(root) {
     const TIP_GAP = 6;          // tooltip 与目标元素的间距 (px)
     const VIEWPORT_PAD = 8;     // 离视口边缘的最小留白 (px)
 
+    // 移动端没有 hover 概念，data-tooltip 整套浮层都不该出现。
+    // 用 matchMedia 与 .is-mobile class 双重判断：class 由 index.html 注入，
+    // 这里再响应断点变化，进入移动端时主动隐藏已经显示的 tooltip。
+    const mq = window.matchMedia("(max-width: 768px)");
+    const isMobile = () => mq.matches || document.documentElement.classList.contains("is-mobile");
+
     // 单一浮层：延迟创建，避免无 tooltip 页面也带一个空的 div。
     let tipEl = null;
     function ensureTip() {
@@ -413,6 +419,7 @@ async function renderIcons(root) {
 
     // mouseover 捕获进入：从触发节点向上找最近的 [data-tooltip]
     document.addEventListener("mouseover", (e) => {
+        if (isMobile()) { hideTip(); return; }
         const target = findTooltipTarget(e.target);
         if (target) {
             positionTip(target);
@@ -425,6 +432,7 @@ async function renderIcons(root) {
     // mouseout 捕获离开：relatedTarget 是新进入的节点，如果仍在某个 [data-tooltip]
     // 子树内就不该隐藏 —— 借助 findTooltipTarget 判断。
     document.addEventListener("mouseout", (e) => {
+        if (isMobile()) { hideTip(); return; }
         const next = findTooltipTarget(e.relatedTarget);
         if (!next) hideTip();
     });
@@ -436,6 +444,11 @@ async function renderIcons(root) {
     window.addEventListener("keydown", (e) => {
         if (e.key === "Escape") hideTip();
     });
+
+    // 跨断点切换到移动端时，立刻收起任何残留的 tooltip，避免浮层停在屏幕上。
+    const onBreakpointChange = () => { if (isMobile()) hideTip(); };
+    if (typeof mq.addEventListener === "function") mq.addEventListener("change", onBreakpointChange);
+    else if (typeof mq.addListener === "function") mq.addListener(onBreakpointChange);
 })();
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -1268,13 +1281,13 @@ function openMobileActions(index, viewType) {
     const sheet = document.createElement("div");
     sheet.className = "mobile-action-sheet";
 
-    // 头部:文件名 + 关闭按钮(用 × 而非 button,跟整体极简风格一致)
+    // 头部:文件名 + 关闭按钮(Material 风格 close 图标,18x18)
     const name = item.display_name || item.name || item.trashed_name || "未命名";
     const head = document.createElement("div");
     head.className = "mobile-action-sheet-header";
     head.innerHTML = `
         <span class="mobile-action-sheet-title" title="${escapeAttr(name)}">${escapeHtml(name)}</span>
-        <button type="button" aria-label="关闭" style="background:transparent;border:none;cursor:pointer;color:var(--text-muted);font-size:18px;line-height:1;">×</button>
+        <button type="button" class="mobile-action-sheet-close" aria-label="关闭"><svg width="18" height="18" viewBox="0 0 24 24" fill="#444746" aria-hidden="true"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg></button>
     `;
     head.querySelector("button").onclick = closeMobileActions;
     sheet.appendChild(head);
