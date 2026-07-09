@@ -521,6 +521,8 @@ function switchToPinnedView() {
     document.getElementById("navTrash").classList.remove("active");
     // pinned 视图下不需要在面包屑尾部再"固定当前目录"按钮
     document.getElementById("bcPinBtn").style.display = "none";
+    // 离开 files 视图：清掉 sidebar 中被高亮的 pinned-item
+    updatePinButton();
     clearSelection();
     // 已固定的文件夹拥有专属 URL(?view=pinned);popstate/启动期由 navigateFromUrl 控制历史,
     // 这里 skipWhenFromPopstate 避免重复写历史。
@@ -536,6 +538,8 @@ function switchToTrashView() {
     document.getElementById("navTrash").classList.add("active");
     // 回收站视图下固定按钮无意义，隐藏
     document.getElementById("bcPinBtn").style.display = "none";
+    // 离开 files 视图：清掉 sidebar 中被高亮的 pinned-item
+    updatePinButton();
     clearSelection();
     // 回收站拥有专属 URL(?view=trash);popstate/启动期由 navigateFromUrl 控制历史,
     // 这里 skipWhenFromPopstate 避免重复写历史。
