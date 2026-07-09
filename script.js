@@ -904,23 +904,51 @@ function _vscrollReset() {
 /**
  * 构造单行 <tr>(不含位置样式),普通渲染与虚拟滚动共用。
  */
+// ================= 自定义双击判定 =================
+// 浏览器原生 ondblclick 的判定时间窗是 OS 决定的(Windows 默认 ~500ms),
+// 用户感知上偏短;改用 1 秒自定义窗口:
+//   - 在 1s 内对同一行(index)连续两次 click → 触发"双击动作"
+//   - 单次 click 仍走 handleRowClick(选中/多选)
+//   - 与浏览器原生 dblclick 解耦,不再受系统设置影响
+const DBLCLICK_WINDOW_MS = 1000;
+let _lastClickTs = 0;
+let _lastClickIndex = -1;
+
+function _attachDblclickHandler(tr, index, action) {
+    // 单独监听 click(不覆盖 tr.onclick 的选中逻辑),做 1s 窗口的双击判定。
+    // 两次 click 都各自跑 tr.onclick(选中),第二次命中 1s 窗口时再额外触发 action。
+    tr.addEventListener("click", () => {
+        const now = Date.now();
+        if (_lastClickIndex === index && (now - _lastClickTs) <= DBLCLICK_WINDOW_MS) {
+            // 命中双击:消耗掉这次窗口,避免后面第三次点击继续误触发
+            _lastClickTs = 0;
+            _lastClickIndex = -1;
+            action();
+            return;
+        }
+        _lastClickTs = now;
+        _lastClickIndex = index;
+    });
+}
+
 function _buildTableRow(item, index) {
     const ext = item.name.split(".").pop().toLowerCase();
     const tr = document.createElement("tr");
     tr.setAttribute("data-index", index);
 
+    // 双击动作:不再用 tr.ondblclick(原生窗口太短),改用 1s 自定义窗口。
     if (currentView === "files" && !item.is_dir) {
         const previewKind = canPreview(item, ext);
         if (previewKind) {
-            tr.ondblclick = () => previewFile(item, previewKind);
+            _attachDblclickHandler(tr, index, () => previewFile(item, previewKind));
             tr.style.cursor = "pointer";
         }
     }
     if (currentView === "files" && item.is_dir) {
-        tr.ondblclick = () => loadPath(joinPath(currentPath, item.name));
+        _attachDblclickHandler(tr, index, () => loadPath(joinPath(currentPath, item.name)));
     }
     if (currentView === "pinned") {
-        tr.ondblclick = () => openPinnedItem(index);
+        _attachDblclickHandler(tr, index, () => openPinnedItem(index));
         tr.style.cursor = "pointer";
     }
 
@@ -1068,7 +1096,7 @@ function handleRowClick(e, idx) {
 
     // ============= 移动端：彻底走单击打开,禁用多选 =============
     if (window.IS_MOBILE) {
-        // 双击逻辑在 _buildTableRow 已通过 ondblclick 绑定;这里只处理单击。
+        // 移动端单次点击即视为"打开",不依赖双击;_attachDblclickHandler 仍绑定但不会被触发。
         // 文件夹 → 进入目录;可预览的文件 → 预览;不可预览的文件 → 交给下方按钮触发下载/其它。
         if (item.is_dir) {
             loadPath(joinPath(currentPath, item.name));
