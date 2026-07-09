@@ -1956,7 +1956,7 @@ body.is-mobile .drop-overlay svg {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 8px 20px 8px;
+    padding: 4px 20px 12px;
     border-bottom: 1px solid var(--border);
     color: var(--text-muted);
     font-size: 16px;
@@ -1965,6 +1965,7 @@ body.is-mobile .drop-overlay svg {
 .mobile-action-sheet-title {
     overflow: hidden;
     text-overflow: ellipsis;
+    font-weight: bold;
     white-space: nowrap;
     min-width: 0;
     max-width: 80vw;
