@@ -21,6 +21,31 @@
     </script>
     <!-- 引入外部 CSS 样式文件 -->
     <link rel="stylesheet" href="style.css">
+    <!-- 移动端判定：在 body 解析之前计算,确保 script.js 读取时已就绪 -->
+    <script>
+        (function () {
+            const MOBILE_QUERY = window.matchMedia("(max-width: 768px)");
+            function applyMobile(e) {
+                window.IS_MOBILE = !!e.matches;
+                if (e.matches) {
+                    document.documentElement.classList.add("is-mobile");
+                    // body 尚未就绪时延后一次
+                    if (document.body) document.body.classList.add("is-mobile");
+                    else document.addEventListener("DOMContentLoaded", () => document.body.classList.add("is-mobile"), { once: true });
+                } else {
+                    document.documentElement.classList.remove("is-mobile");
+                    if (document.body) document.body.classList.remove("is-mobile");
+                }
+            }
+            applyMobile(MOBILE_QUERY);
+            // 跨断点时刷新(横竖屏切换 / 窗口拖动 / 开发者工具切换设备)
+            if (typeof MOBILE_QUERY.addEventListener === "function") {
+                MOBILE_QUERY.addEventListener("change", applyMobile);
+            } else if (typeof MOBILE_QUERY.addListener === "function") {
+                MOBILE_QUERY.addListener(applyMobile);
+            }
+        })();
+    </script>
     <!-- 引入 SparkMD5 插件 -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
     <!-- Markdown 渲染（marked.js） -->
@@ -121,25 +146,38 @@
     <!-- 侧边栏拖拽把手：可左右拖动调整 sidebar 宽度 -->
     <div class="sidebar-resizer" id="sidebarResizer" role="separator" aria-orientation="vertical" aria-label="拖动调整侧边栏宽度"></div>
 
+    <!-- 移动端：侧边栏遮罩(默认全屏但透明,点遮罩收起侧边栏) -->
+    <div class="sidebar-mask" id="sidebarMask" aria-hidden="true"></div>
+
     <div class="main-area">
         <!-- 顶部工具栏：路径 + 大头针 + 搜索 -->
         <div class="top-bar">
             <div class="explorer-toolbar">
-                <!-- 路径显示与编辑区域：点击空白处进入编辑模式 -->
-                <div class="path-box" id="pathBox" onclick="enterPathEditMode()">
-                    <div class="breadcrumb" id="breadcrumb">
-                        <span onclick="event.stopPropagation(); navFilesClick()">Home</span>
-                    </div>
-                    <input type="text" id="pathInput" class="path-input" autocomplete="off"
-                           onblur="exitPathEditMode()"
-                           onkeydown="handlePathKeydown(event)"
-                           style="display: none;">
-                </div>
+                <!-- 路径行:汉堡(移动端)/路径/大头针 共占一行,搜索单独占下一行 -->
+                <div class="path-row">
+                    <!-- 移动端：汉堡菜单按钮(PC 端 display:none) -->
+                    <button class="mobile-hamburger" id="mobileHamburger" type="button" aria-label="打开导航菜单" data-tooltip="菜单">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" focusable="false">
+                            <path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/>
+                        </svg>
+                    </button>
 
-                <!-- 大头针按钮（路径与搜索之间） -->
-                <button class="bc-pin-btn" id="bcPinBtn" onclick="togglePinCurrentPath()" data-tooltip="固定当前位置" aria-label="固定当前位置">
-                    <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
-                </button>
+                    <!-- 路径显示与编辑区域：点击空白处进入编辑模式 -->
+                    <div class="path-box" id="pathBox" onclick="enterPathEditMode()">
+                        <div class="breadcrumb" id="breadcrumb">
+                            <span onclick="event.stopPropagation(); navFilesClick()">Home</span>
+                        </div>
+                        <input type="text" id="pathInput" class="path-input" autocomplete="off"
+                               onblur="exitPathEditMode()"
+                               onkeydown="handlePathKeydown(event)"
+                               style="display: none;">
+                    </div>
+
+                    <!-- 大头针按钮（移动端隐藏） -->
+                    <button class="bc-pin-btn" id="bcPinBtn" onclick="togglePinCurrentPath()" data-tooltip="固定当前位置" aria-label="固定当前位置">
+                        <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+                    </button>
+                </div>
 
                 <!-- 搜索框 -->
                 <div class="search-box">

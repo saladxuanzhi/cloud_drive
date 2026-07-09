@@ -80,8 +80,11 @@ function syncUrlFromState(replace, { skipWhenFromPopstate = false } = {}) {
         window.location.pathname +
         (window.location.search || "") +
         (window.location.hash || "");
-    // 比较时把 pathname 末尾的 "/" 也算成"等价于空",避免外部链接尾部斜杠导致的重复条目
-    const norm = (s) => (s.endsWith("?") ? s.slice(0, -1) : s);
+    // 同时归一化尾部 "/" 和 "?",避免外部链接尾部斜杠导致的重复条目污染历史栈。
+    // 这条 norm 是浏览器回退正确性的关键:回退时若 location.pathname 末尾有 "/" 而 target 没有,
+    // 不归一化会让 popstate 触发的 syncUrl 误认为"需要 pushState",结果在历史里塞进一条
+    // URL 等价但不同的条目,导致第二次回退指向同一 URL、看起来"没反应"。
+    const norm = (s) => s.replace(/\/+$/, "").replace(/\?+$/, "");
     if (norm(current) === norm(target)) return;
     try {
         if (replace) {
@@ -510,10 +513,10 @@ async function loadPath(path) {
     updateBreadcrumb();
     updatePinButton();
     clearSelection();
-    // 把当前目录同步到地址栏:由用户交互触发时 pushState(新增历史),
-    // 由 popstate / 启动期触发时由 navigateFromUrl 控制,这里统一 push。
-    // 状态未变化(重复 loadPath 同一路径)时由 syncUrlFromState 内部去重。
-    syncUrlFromState(false);
+    // 把当前目录同步到地址栏:由用户交互触发时 pushState(新增历史);
+    // 由 popstate / 启动期触发时 navigateFromUrl 已经把 URL 改好,这里跳过避免冗余条目。
+    // skipWhenFromPopstate 仅在 _popstateNavigating 为 true 时生效,不影响用户主动点击的写入。
+    syncUrlFromState(false, { skipWhenFromPopstate: true });
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/files?path=${encodeURIComponent(path)}`, {
             signal: currentListController.signal,
@@ -692,28 +695,37 @@ function renderTableHeader() {
                 ${sortableTh("名称", "name")}
                 ${sortableTh("修改时间", "modified")}
                 ${sortableTh("大小", "size")}
-                <th style="width: 140px;"></th>
+                <th class="col-actions" style="width: 140px;"></th>
             </tr>
         `;
     } else if (currentView === "pinned") {
         head.innerHTML = `
             <tr>
                 ${sortableTh("名称", "name")}
-                <th>完整路径</th>
-                <th style="width: 140px;"></th>
+                <th class="col-fullpath">完整路径</th>
+                <th class="col-actions" style="width: 140px;"></th>
             </tr>
         `;
     } else {
         head.innerHTML = `
             <tr>
                 ${sortableTh("名称", "name")}
-                <th>原位置</th>
+                <th class="col-trash-original">原位置</th>
                 ${sortableTh("删除时间", "modified")}
                 ${sortableTh("大小", "size")}
-                <th style="width: 100px;">操作</th>
+                <th class="col-actions" style="width: 100px;">操作</th>
             </tr>
         `;
     }
+
+    // 给每列的 data-field / 静态 <th> 加上列语义类,
+    // 移动端 CSS 通过这些类决定哪些列在窄屏隐藏。
+    const ths = head.querySelectorAll("th");
+    ths.forEach((th) => {
+        const field = th.getAttribute("data-field");
+        if (field === "modified") th.classList.add("col-modified");
+        else if (field === "size") th.classList.add("col-size");
+    });
 }
 
 // ================= 虚拟滚动 =================
@@ -855,10 +867,10 @@ function _buildTableRow(item, index) {
     let actionCell = "";
 
     if (currentView === "files") {
-        metaCells = `<td>${formatDate(item.modified)}</td><td>${formatBytes(item.size)}</td>`;
+        metaCells = `<td class="col-modified">${formatDate(item.modified)}</td><td class="col-size">${formatBytes(item.size)}</td>`;
         actionCell = `
-            <td>
-                <div style="display:flex;">
+            <td class="col-actions">
+                <div class="row-actions-desktop" style="display:flex;">
                     <div class="action-btn" data-tooltip="重命名" onclick="event.stopPropagation(); openRenameDialog(${index})">
                         <svg height="20" viewBox="0 -960 960 960" width="20" focusable="false" fill="currentColor"><path d="M351-144l144-144h369v144H351Zm-183-72h51l375-375-51-51-375 375v51Zm-72 72v-153l498-498q11-11 23.84-16 12.83-5 27-5 14.16 0 27.16 5t24 16l51 51q11 11 16 24t5 26.54q0 14.45-5.02 27.54T747-642L249-144H96Zm600-549-51-51 51 51Zm-127.95 76.95L543-642l51 51-25.95-25.05Z"/></svg>
                     </div>
@@ -874,12 +886,13 @@ function _buildTableRow(item, index) {
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4h-5zm2 15H7V6h10v13zM9 8h2v9H9zm4 0h2v9h-2z"/></svg>
                     </div>
                 </div>
+                <button class="action-more" type="button" aria-label="更多操作" onclick="event.stopPropagation(); openMobileActions(${index}, 'files')">⋮</button>
             </td>`;
     } else if (currentView === "pinned") {
-        metaCells = `<td style="color:var(--text-muted); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.full_path || "根目录")}">${escapeHtml(item.full_path || "根目录")}</td>`;
+        metaCells = `<td class="col-fullpath" style="color:var(--text-muted); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.full_path || "根目录")}">${escapeHtml(item.full_path || "根目录")}</td>`;
         actionCell = `
-            <td>
-                <div style="display:flex;">
+            <td class="col-actions">
+                <div class="row-actions-desktop" style="display:flex;">
                     <div class="action-btn" data-tooltip="进入目录" onclick="event.stopPropagation(); openPinnedItem(${index})">
                         <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5z"/></svg>
                     </div>
@@ -890,15 +903,16 @@ function _buildTableRow(item, index) {
                         <svg width="20" width="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
                     </div>
                 </div>
+                <button class="action-more" type="button" aria-label="更多操作" onclick="event.stopPropagation(); openMobileActions(${index}, 'pinned')">⋮</button>
             </td>`;
     } else {
         metaCells = `
-            <td style="color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.original_path)}">${escapeHtml(item.original_path)}</td>
-            <td>${formatDate(item.deleted_at)}</td>
-            <td>${formatBytes(item.size)}</td>`;
+            <td class="col-trash-original" style="color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.original_path)}">${escapeHtml(item.original_path)}</td>
+            <td class="col-modified">${formatDate(item.deleted_at)}</td>
+            <td class="col-size">${formatBytes(item.size)}</td>`;
         actionCell = `
-            <td>
-                <div style="display:flex;">
+            <td class="col-actions">
+                <div class="row-actions-desktop" style="display:flex;">
                     <div class="action-btn" data-tooltip="还原" onclick="event.stopPropagation(); restoreSingle('${escapeAttr(item.trashed_name)}')">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="#444746"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
                     </div>
@@ -906,6 +920,7 @@ function _buildTableRow(item, index) {
                         <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M9.4 16.5l2.6-2.6 2.6 2.6 1.4-1.4-2.6-2.6L16 9.9l-1.4-1.4-2.6 2.6-2.6-2.6L8 9.9l2.6 2.6L8 15.1ZM7 21q-.825 0-1.412-.587Q5 19.825 5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413Q17.825 21 17 21ZM17 6H7v13h10ZM7 6v13Z"/></svg>
                     </div>
                 </div>
+                <button class="action-more" type="button" aria-label="更多操作" onclick="event.stopPropagation(); openMobileActions(${index}, 'trash')">⋮</button>
             </td>`;
     }
 
@@ -989,6 +1004,21 @@ function escapeHtml(s) {
 function handleRowClick(e, idx) {
     const item = currentItemsList[idx];
     if (!item) return;
+
+    // ============= 移动端：彻底走单击打开,禁用多选 =============
+    if (window.IS_MOBILE) {
+        // 双击逻辑在 _buildTableRow 已通过 ondblclick 绑定;这里只处理单击。
+        // 文件夹 → 进入目录;可预览的文件 → 预览;不可预览的文件 → 交给下方按钮触发下载/其它。
+        if (item.is_dir) {
+            loadPath(joinPath(currentPath, item.name));
+        } else {
+            const ext = (item.name.split(".").pop() || "").toLowerCase();
+            const previewKind = canPreview(item, ext);
+            if (previewKind) previewFile(item, previewKind);
+            // 非预览类型的文件不做事,让用户点行尾 ⋮ 操作
+        }
+        return;
+    }
 
     const additive = e.ctrlKey || e.metaKey;     // 多选修饰键
     const range = e.shiftKey && lastSelectedIndex >= 0;
@@ -1086,6 +1116,177 @@ function updateSelectionState() {
         document.body.classList.remove("has-selection");
     }
 }
+
+/* ================= 移动端:侧边栏抽屉 + 行动作面板 =================
+   全部用 window.IS_MOBILE 守卫,不污染 PC 端逻辑。
+   DOM 钩子：.mobile-hamburger / .sidebar-mask / .sidebar
+   装饰面板容器：动态创建 #mobileActionSheetOverlay,只在点击 ⋮ 时插入。 */
+
+function toggleSidebar(force) {
+    if (!window.IS_MOBILE) return;
+    const sidebar = document.querySelector(".sidebar");
+    const mask = document.getElementById("sidebarMask");
+    if (!sidebar || !mask) return;
+    const willOpen = (force === undefined) ? !sidebar.classList.contains("is-open") : !!force;
+    sidebar.classList.toggle("is-open", willOpen);
+    mask.classList.toggle("is-open", willOpen);
+    document.body.classList.toggle("no-scroll", willOpen);
+}
+
+function closeSidebar() {
+    toggleSidebar(false);
+}
+
+/**
+ * 移动端行动作面板
+ * @param {number} index   currentItemsList 中的索引
+ * @param {"files"|"pinned"|"trash"} viewType   视图类型,决定显示哪些操作项
+ */
+function openMobileActions(index, viewType) {
+    if (!window.IS_MOBILE) return;
+    const item = currentItemsList[index];
+    if (!item) return;
+    closeMobileActions();
+
+    const overlay = document.createElement("div");
+    overlay.className = "mobile-action-sheet-overlay";
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeMobileActions(); });
+    overlay.addEventListener("touchstart", (e) => { if (e.target === overlay) closeMobileActions(); }, { passive: true });
+
+    const sheet = document.createElement("div");
+    sheet.className = "mobile-action-sheet";
+
+    // 头部:文件名 + 关闭按钮(用 × 而非 button,跟整体极简风格一致)
+    const name = item.display_name || item.name || item.trashed_name || "未命名";
+    const head = document.createElement("div");
+    head.className = "mobile-action-sheet-header";
+    head.innerHTML = `
+        <span class="mobile-action-sheet-title" title="${escapeAttr(name)}">${escapeHtml(name)}</span>
+        <button type="button" aria-label="关闭" style="background:transparent;border:none;cursor:pointer;color:var(--text-muted);font-size:18px;line-height:1;">×</button>
+    `;
+    head.querySelector("button").onclick = closeMobileActions;
+    sheet.appendChild(head);
+
+    // 操作列表:按视图构造
+    const actions = [];
+    if (viewType === "files") {
+        actions.push({ label: "预览", icon: previewIcon(), run: () => {
+            const ext = (item.name.split(".").pop() || "").toLowerCase();
+            const previewKind = canPreview(item, ext);
+            if (previewKind) previewFile(item, previewKind);
+            else alert("该文件类型暂不支持预览");
+        }});
+        actions.push({ label: "下载", icon: downloadIcon(), run: () => {
+            if (item.is_dir) downloadFolder(item.name);
+            else downloadFile(item.name);
+        }});
+        actions.push({ label: "复制链接", icon: linkIcon(), run: () => {
+            // 复用 PC 端的 copyLink,但只让当前项入选中
+            selectedItems = [item];
+            lastSelectedIndex = index;
+            copyLink();
+        }});
+        actions.push({ label: "重命名", icon: renameIcon(), run: () => openRenameDialog(index) });
+        actions.push({ label: "移动到...", icon: moveIcon(), run: () => moveSingle(item.name) });
+        actions.push({ label: "移至回收站", icon: trashIcon(), danger: true, run: () => trashSingle(item.name) });
+    } else if (viewType === "pinned") {
+        actions.push({ label: "进入目录", icon: enterIcon(), run: () => openPinnedItem(index) });
+        actions.push({ label: "下载", icon: downloadIcon(), run: () => downloadFolder(item.full_path) });
+        actions.push({ label: "取消固定", icon: unpinIcon(), run: () => unpinFromMain(index) });
+    } else { // trash
+        actions.push({ label: "还原", icon: restoreIcon(), run: () => restoreSingle(item.trashed_name) });
+        actions.push({ label: "永久删除", icon: trashIcon(), danger: true, run: () => deletePermSingle(item.trashed_name) });
+    }
+
+    actions.forEach((a) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "mobile-action-sheet-item" + (a.danger ? " danger" : "");
+        btn.innerHTML = `${a.icon}<span>${escapeHtml(a.label)}</span>`;
+        btn.onclick = () => { closeMobileActions(); a.run(); };
+        sheet.appendChild(btn);
+    });
+
+    // 底部:取消
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "mobile-action-sheet-cancel";
+    cancel.textContent = "取消";
+    cancel.onclick = closeMobileActions;
+    sheet.appendChild(cancel);
+
+    overlay.appendChild(sheet);
+    document.body.appendChild(overlay);
+}
+
+function closeMobileActions() {
+    const existing = document.querySelector(".mobile-action-sheet-overlay");
+    if (existing) existing.remove();
+}
+
+// === 操作图标 ===
+function previewIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zm0 12.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg>`;
+}
+function downloadIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M4.8 21.6q-0.99 0-1.695-0.705T2.4 19.2V15.6h2.4v3.6h14.4V15.6h2.4v3.6q0 0.99-0.705 1.695T19.2 21.6H4.8Zm7.2-4.8L6 10.8l1.68-1.74 3.12 3.12V2.4h2.4v9.78l3.12-3.12 1.68 1.74-6 6Z"/></svg>`;
+}
+function linkIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3.9 12c0-1.7 1.4-3.1 3.1-3.1h4V7H7c-2.8 0-5 2.2-5 5s2.2 5 5 5h4v-1.9H7C5.3 15.1 3.9 13.7 3.9 12zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.7 0 3.1 1.4 3.1 3.1s-1.4 3.1-3.1 3.1h-4V17h4c2.8 0 5-2.2 5-5s-2.2-5-5-5z"/></svg>`;
+}
+function renameIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>`;
+}
+function moveIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10zm-8.01-9l-1.41 1.41L12.16 12H8v2h4.16l-1.59 1.59L11.99 17 16 13.01 11.99 9z"/></svg>`;
+}
+function trashIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+}
+function enterIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5z"/></svg>`;
+}
+function unpinIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" transform="rotate(45 12 12)"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>`;
+}
+function restoreIcon() {
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9z"/></svg>`;
+}
+
+// 绑定汉堡按钮 + 遮罩点击
+document.addEventListener("DOMContentLoaded", () => {
+    const burger = document.getElementById("mobileHamburger");
+    if (burger) burger.addEventListener("click", () => toggleSidebar());
+    const mask = document.getElementById("sidebarMask");
+    if (mask) mask.addEventListener("click", () => closeSidebar());
+});
+
+// 跨断点切换时,清理掉移动端才有的抽屉状态,避免 PC 端看到奇怪的 fixed 侧边栏
+(function () {
+    const mq = window.matchMedia("(max-width: 768px)");
+    if (!mq) return;
+    const handler = () => {
+        if (!mq.matches) {
+            const sidebar = document.querySelector(".sidebar");
+            const mask = document.getElementById("sidebarMask");
+            if (sidebar) sidebar.classList.remove("is-open");
+            if (mask) mask.classList.remove("is-open");
+            document.body.classList.remove("no-scroll");
+            closeMobileActions();
+        }
+        // 断点两侧都重新检测 path 溢出
+        requestAnimationFrame(() => truncateBreadcrumb());
+    };
+    if (typeof mq.addEventListener === "function") mq.addEventListener("change", handler);
+    else if (typeof mq.addListener === "function") mq.addListener(handler);
+
+    // 防抖 resize:窗口拉宽拉窄都会影响 path-box 可用宽度
+    let resizeTimer = null;
+    window.addEventListener("resize", () => {
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => truncateBreadcrumb(), 100);
+    });
+})();
 
 // Esc 清空选择（重命名输入框里的 Esc 由各自监听器自行处理，不冒泡到这里）
 document.addEventListener("keydown", (e) => {
@@ -2611,8 +2812,7 @@ async function updateStorage() {
 }
 
 function updateBreadcrumb() {
-    // navFiles（侧边栏「主目录」）仅在 files 视图且路径为 Home 时高亮，
-    // 进入任何子目录后应取消激活。
+    // 主目录(侧边栏「主目录」)高亮:仅 files 视图且 currentPath 为空时
     const navFiles = document.getElementById("navFiles");
     if (navFiles) {
         navFiles.classList.toggle("active", currentView === "files" && currentPath === "");
@@ -2620,27 +2820,155 @@ function updateBreadcrumb() {
 
     const bc = document.getElementById("breadcrumb");
     if (currentView === "trash") {
-        bc.innerHTML = `<span style="cursor:default; padding:2px 4px;">回收站</span>`;
+        bc.innerHTML = `<span class="bc-fixed">回收站</span>`;
         return;
     }
     if (currentView === "pinned") {
-        bc.innerHTML = `<span style="cursor:default; padding:2px 4px;">已固定的文件夹</span>`;
+        bc.innerHTML = `<span class="bc-fixed">已固定的文件夹</span>`;
         return;
     }
-    // event.stopPropagation() 防止点击面包屑片段时触发 path-box 的 enterPathEditMode
-    // Home 走 navFilesClick():即使从 trash/pinned 视图跳过来也能切回 files 视图,
-    // 并把 URL 同步到裸 base(?path= / ?view= 全部剥掉)。
+    // files 视图:Home + 每级目录;Home 走 navFilesClick() 回到根目录并擦掉 ?path= / ?view=
     let html = `<span onclick="event.stopPropagation(); navFilesClick()">Home</span>`;
     if (currentPath) {
-        const parts = currentPath.split("/");
+        const parts = currentPath.split("/").filter((p) => p);
         let cur = "";
-        parts.forEach(p => {
-            if(!p) return;
+        parts.forEach((p, idx) => {
             cur += (cur ? "/" : "") + p;
-            html += `<span class="separator"><svg class="a-s-fa-Ha-pa c-qd" width="24" height="24" viewBox="0 0 24 24" focusable="false" fill="rgb(116,119,117)"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path></svg></span><span onclick="event.stopPropagation(); loadPath('${escapeAttr(cur)}')">${escapeHtml(p)}</span>`;
+            const isLast = idx === parts.length - 1;
+            const cls = isLast ? ' class="bc-current"' : "";
+            html += `<span class="separator"><svg class="a-s-fa-Ha-pa c-qd" width="24" height="24" viewBox="0 0 24 24" focusable="false" fill="rgb(116,119,117)"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path></svg></span><span${cls} onclick="event.stopPropagation(); loadPath('${escapeAttr(cur)}')" title="${escapeAttr(p)}">${escapeHtml(p)}</span>`;
         });
     }
     bc.innerHTML = html;
+    // DOM 渲染后检测溢出并截断;用 rAF 保证拿到正确的 scrollWidth
+    requestAnimationFrame(() => truncateBreadcrumb());
+}
+
+/**
+ * 路径溢出截断:
+ *   - 保留 Home 与 current 始终可见
+ *   - 从左向右逐对隐藏中间 segment + 它前面的 separator,直到不溢出
+ *   - 有任何隐藏则在 Home 后插入 chevron + … 作为占位
+ *   - 插入省略号后再检查一次溢出,必要时继续隐藏(省略号本身有宽度)
+ *   - 若仍溢出(说明 bc-current 单段就已经超过 path-box),用二分查找直接裁短文本
+ * 触发时机:updateBreadcrumb 末尾 / 退出编辑模式 / window resize / 跨断点切换
+ */
+function truncateBreadcrumb() {
+    const breadcrumb = document.getElementById("breadcrumb");
+    const pathBox = document.getElementById("pathBox");
+    if (!breadcrumb || !pathBox) return;
+    if (pathBox.classList.contains("is-editing")) return;
+    if (currentView !== "files") return;
+
+    // 清掉上次插入的省略号 + 占位 separator,恢复子项显示,并把 bc-current 还原成完整文本
+    breadcrumb.querySelectorAll(".bc-ellipsis, .separator.is-inserted").forEach((el) => el.remove());
+    Array.from(breadcrumb.children).forEach((el) => {
+        el.style.display = "";
+        el.classList.remove("is-inserted");
+    });
+    const bcCurrent = breadcrumb.querySelector(".bc-current");
+    if (bcCurrent && bcCurrent.dataset.fullText != null) {
+        bcCurrent.textContent = bcCurrent.dataset.fullText;
+    }
+
+    if (breadcrumb.children.length <= 1) return;
+
+    // current 段索引 = 最后一个非 separator 子元素
+    const children = Array.from(breadcrumb.children);
+    let currentIdx = -1;
+    for (let i = children.length - 1; i >= 0; i--) {
+        if (!children[i].classList.contains("separator")) {
+            currentIdx = i;
+            break;
+        }
+    }
+    if (currentIdx <= 1) return;
+
+    const isOverflowing = () => breadcrumb.scrollWidth > breadcrumb.clientWidth + 1;
+
+    // 隐藏最靠左尚未隐藏的中间 segment 与它前面的 separator
+    const hideLeftmostMidPair = () => {
+        for (let i = 1; i < currentIdx; i++) {
+            const child = children[i];
+            if (child.classList.contains("separator")) continue;
+            if (child.style.display === "none") continue;
+            children[i - 1].style.display = "none";
+            child.style.display = "none";
+            return true;
+        }
+        return false;
+    };
+
+    // 第一轮:隐藏中间段到不溢出
+    while (isOverflowing()) {
+        if (!hideLeftmostMidPair()) break;
+        void breadcrumb.offsetWidth;
+    }
+
+    // 统计被隐藏的中间 segment 数量
+    let hiddenCount = 0;
+    for (let i = 1; i < currentIdx; i++) {
+        if (!children[i].classList.contains("separator") &&
+            children[i].style.display === "none") {
+            hiddenCount++;
+        }
+    }
+
+    // 有任何隐藏则在 Home 后插入 chevron + 省略号
+    if (hiddenCount > 0) {
+        const sep = document.createElement("span");
+        sep.className = "separator is-inserted";
+        sep.innerHTML = `<svg class="a-s-fa-Ha-pa c-qd" width="24" height="24" viewBox="0 0 24 24" focusable="false" fill="rgb(116,119,117)"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path></svg>`;
+        const ell = document.createElement("span");
+        ell.className = "bc-ellipsis";
+        ell.textContent = "…";
+        ell.setAttribute("aria-hidden", "true");
+        children[0].after(sep);
+        sep.after(ell);
+    }
+
+    // 省略号插入后再检查一次溢出,必要时继续隐藏中间段
+    while (isOverflowing()) {
+        if (!hideLeftmostMidPair()) break;
+        void breadcrumb.offsetWidth;
+    }
+
+    // 兜底:即使把全部中间段都隐藏仍溢出,说明 bc-current 单段就超出 path-box,
+    // 此时直接裁短 bc-current 的文本(用二分找最长能 fit 的前缀)
+    trimBcCurrentToFit(breadcrumb, bcCurrent, isOverflowing);
+}
+
+/**
+ * 直接裁短 bc-current 的文本内容,作为 flex-shrink + text-overflow:ellipsis 之外的兜底。
+ * 缓存原始文本到 dataset.fullText,以便 truncateBreadcrumb 每次重算时能恢复。
+ */
+function trimBcCurrentToFit(breadcrumb, bcCurrent, isOverflowing) {
+    if (!bcCurrent) return;
+
+    if (bcCurrent.dataset.fullText == null) {
+        bcCurrent.dataset.fullText = bcCurrent.getAttribute("title") || bcCurrent.textContent;
+    }
+    const fullText = bcCurrent.dataset.fullText;
+    if (!fullText) return;
+
+    if (!isOverflowing()) {
+        if (bcCurrent.textContent !== fullText) bcCurrent.textContent = fullText;
+        return;
+    }
+
+    // 二分查找最长能 fit 的前缀(加上省略号字符)
+    let lo = 0, hi = fullText.length;
+    while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        bcCurrent.textContent = fullText.slice(0, mid) + "…";
+        void breadcrumb.offsetWidth;
+        if (isOverflowing()) {
+            hi = mid - 1;
+        } else {
+            lo = mid;
+        }
+    }
+    bcCurrent.textContent = lo > 0 ? fullText.slice(0, lo) + "…" : "…";
 }
 
 // ================= 路径框：点击空白处进入"地址栏编辑"模式 =================
@@ -2679,6 +3007,8 @@ function exitPathEditMode() {
     pathBox.classList.remove("is-editing");
     pathInput.style.display = "none";
     breadcrumb.style.display = "flex";
+    // 编辑模式下隐藏了面包屑,刚显示出来需要重新检测溢出
+    requestAnimationFrame(() => truncateBreadcrumb());
 }
 
 /**

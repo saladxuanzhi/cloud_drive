@@ -241,8 +241,7 @@ body.has-selection .top-bar > .explorer-toolbar {
     pointer-events: none;
 }
 
-/* ================= 仿 Windows 资源管理器工具栏 ================= */
-/* 路径 + 大头针 + 搜索 三块同一行排列，圆角胶囊风格贴合页面整体风格。 */
+/* 顶部 toolbar:PC 端路径/大头针/搜索同行 */
 .explorer-toolbar {
     display: flex;
     align-items: center;
@@ -250,7 +249,16 @@ body.has-selection .top-bar > .explorer-toolbar {
     width: 100%;
 }
 
-/* 路径框：占满剩余空间，胶囊圆角，柔和的悬停反馈 */
+/* path-row:汉堡(移动端)/路径/大头针 三块装在同一行,与搜索框分离 */
+.path-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+}
+
+/* path-box:胶囊圆角,占满 path-row 剩余空间,内部单行展示面包屑 */
 .path-box {
     flex: 1;
     min-width: 0;
@@ -265,18 +273,15 @@ body.has-selection .top-bar > .explorer-toolbar {
     transition: background-color 0.18s ease, border-color 0.18s ease,
                 box-shadow 0.18s ease;
     overflow: hidden;
-    /* 默认不可选中文字：仅在编辑模式（.is-editing 显式恢复）和
-       .path-input 自带的 native 选区中才能选。 */
     user-select: none;
     -webkit-user-select: none;
 }
 
-/* 编辑模式：主题色淡蓝填充 + 主色边框 */
+/* 编辑模式:主题色边框 + 文字可选 */
 .path-box.is-editing {
     background: #ffffff;
     border-color: var(--primary);
     box-shadow: 0 1px 4px rgba(26, 115, 232, 0.15);
-    /* 进入编辑模式后，路径文字可被选中（虽然实际选区在 input 内） */
     user-select: text;
     -webkit-user-select: text;
 }
@@ -285,7 +290,7 @@ body.has-selection .top-bar > .explorer-toolbar {
     background: var(--input-bg-hover);
 }
 
-/* 非 files 视图（pinned / trash）下，path-box 不应表现为可点击 / 可编辑 */
+/* pinned / trash 视图下 path-box 不可点击 */
 body:not([data-view="files"]) .path-box {
     cursor: default;
 }
@@ -293,7 +298,7 @@ body:not([data-view="files"]) .path-box:hover {
     background: var(--input-bg);
 }
 
-/* 面包屑：紧凑、与输入框同样字号 */
+/* 面包屑容器:flex 单行,溢出由 truncateBreadcrumb 隐藏中间段 + bc-current 省略号处理 */
 .breadcrumb {
     font-size: 16px;
     font-weight: 400;
@@ -305,28 +310,28 @@ body:not([data-view="files"]) .path-box:hover {
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
-    /* 面包屑本身不可被拖蓝选中 */
+    flex-wrap: nowrap;
     user-select: none;
     -webkit-user-select: none;
 }
 
-.breadcrumb span {
+/* 所有 span 节点:胶囊样式,默认不收缩(line-height 收紧以匹配面包屑高度) */
+.breadcrumb > span {
     cursor: pointer;
     padding: 3px 8px;
     border-radius: 12px;
     transition: background-color 0.15s ease, color 0.15s ease;
+    flex-shrink: 0;
+    line-height: 1;
 }
 
-.breadcrumb span:hover {
+.breadcrumb > span:hover {
     background: var(--hover-bg);
     color: var(--primary);
     text-decoration: none;
 }
 
-.breadcrumb span:not(.separator) {
-    line-height: 1;
-}
-
+/* chevron 分隔符 */
 .breadcrumb .separator {
     display: inline-flex;
     align-items: center;
@@ -335,9 +340,7 @@ body:not([data-view="files"]) .path-box:hover {
     cursor: default;
     padding: 0;
     user-select: none;
-    /* 自身不允许拦截鼠标 —— 两侧的 breadcrumb 片段仍可点击 */
     pointer-events: none;
-    flex-shrink: 0;
 }
 
 .breadcrumb .separator svg {
@@ -349,6 +352,39 @@ body:not([data-view="files"]) .path-box:hover {
 .breadcrumb .separator:hover {
     background: transparent;
     color: #b0b4ba;
+}
+
+/* 路径溢出时的省略号占位:不可点击,提示存在被省略的层级 */
+.breadcrumb .bc-ellipsis {
+    cursor: default;
+    pointer-events: none;
+    color: var(--text-muted);
+    padding: 3px 4px;
+}
+
+.breadcrumb .bc-ellipsis:hover {
+    background: transparent;
+    color: var(--text-muted);
+}
+
+/* 当前段(最后一段目录/文件名):唯一允许收缩的元素,
+   自身溢出时由 text-overflow 截短为省略号 */
+.breadcrumb .bc-current {
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex-shrink: 1;
+    max-width: 100%;
+    padding-left: 4px;
+}
+
+/* 非 files 视图下的固定文字(回收站 / 已固定的文件夹),仅展示不可交互 */
+.breadcrumb .bc-fixed {
+    cursor: default;
+}
+.breadcrumb .bc-fixed:hover {
+    background: transparent;
+    color: var(--text-muted);
 }
 
 /* 编辑模式下的真实路径输入框 */
@@ -511,6 +547,8 @@ body:not([data-view="files"]) .path-box:hover {
     padding: 0 8px;
     vertical-align: middle;
     border-bottom: 1px solid var(--border);
+    /* 表头文字严禁换行；超出宽度由 th 自身 overflow 处理 */
+    white-space: nowrap;
 }
 
 /* ================= 列排序 ================= */
@@ -1461,4 +1499,412 @@ body:not([data-view="files"]) .path-box:hover {
     color: #aaa;
     padding: 40px 0;
     font-size: 14px;
+}
+
+/* ================= 移动端适配 (≤768px) =================
+   以下所有规则只在 body 含 .is-mobile 时生效,PC 端零影响。 */
+
+/* 关闭移动端点击高亮,提升触摸视觉一致性 */
+html.is-mobile {
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* ============= 1. 侧边栏抽屉 + 汉堡按钮 + 遮罩 ============= */
+
+/* 汉堡按钮：PC 端隐藏,只在窄屏可见 */
+.mobile-hamburger {
+    display: none;
+}
+
+body.is-mobile .mobile-hamburger {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* 移动端：在 .path-row 内 flex 流式摆放，与 path-box 共享一行 */
+    position: static;
+    top: auto;
+    left: auto;
+    z-index: auto;
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: #fff;
+    color: var(--text-muted);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    cursor: pointer;
+}
+body.is-mobile .mobile-hamburger:active {
+    background: var(--hover-bg);
+}
+
+/* 抽屉状态:sidebar 从左侧滑出
+   用 html.is-mobile(脚本在 head 即给 <html> 加类,首次绘制前已生效),
+   而不是 body.is-mobile,避免 sidebar 在 body 拿到类之前先渲染一次再被推出。 */
+body.is-mobile .sidebar,
+html.is-mobile .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 280px;
+    max-width: 85vw;
+    min-width: 280px;
+    z-index: 2000;
+    background: var(--surface);
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    overflow-y: auto;
+    /* 阴影只在打开时出现,避免隐藏态在屏幕左缘露出阴影条 */
+}
+body.is-mobile .sidebar.is-open,
+html.is-mobile .sidebar.is-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.15);
+}
+
+/* 抽屉打开时,拖拽把手没有意义,直接隐藏 */
+body.is-mobile .sidebar-resizer {
+    display: none;
+}
+
+/* 遮罩：默认透明隐藏,叠加 .is-open 时半透明可见 */
+.sidebar-mask {
+    display: none;
+}
+body.is-mobile .sidebar-mask.is-open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 1999;
+    animation: maskFade 0.2s ease;
+}
+
+@keyframes maskFade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* 抽屉展开时锁定主页面滚动,避免侧滑手势与背景列表争夺滚动 */
+body.is-mobile.no-scroll {
+    overflow: hidden;
+}
+
+/* 主区域在抽屉打开时仍可点击遮罩,所以 pointer-events 由遮罩本身接收,
+   此处把 main-area 推到抽屉右侧不被遮挡 */
+body.is-mobile .main-area {
+    padding: 8px 8px 8px 8px;
+    margin-top: 0;
+}
+
+/* 让 main-container 也贴合移动端：去掉大圆角与圆角阴影 */
+body.is-mobile .main-container {
+    border-radius: 12px;
+    box-shadow: none;
+}
+
+/* ============= 2. 顶部地址 + 搜索上下两行 ============= */
+
+body.is-mobile .explorer-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+body.is-mobile .path-row {
+    /* 移动端：path-row 与 search-box 在 column 中各占一行 */
+    flex: 0 0 auto;
+}
+
+/* 移动端隐藏大头针：它会与汉堡和搜索抢紧凑的横向空间 */
+body.is-mobile .bc-pin-btn {
+    display: none !important;
+}
+
+/* 路径框在 path-row 内恢复 flex:1,以便与汉堡并列时占满剩余空间 */
+body.is-mobile .path-box {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+}
+
+/* 搜索框独占下一行,撑满 */
+body.is-mobile .search-box {
+    width: 100%;
+    flex: 0 0 auto;
+}
+
+/* ============= 3. 文件列表 ============= */
+
+/* 3.1 隐藏次要列(修改时间 / 大小,以及 pinned 视图的"完整路径") */
+body.is-mobile .col-modified,
+body.is-mobile .col-size,
+body.is-mobile .col-fullpath,
+body.is-mobile .col-trash-original {
+    display: none !important;
+}
+
+/* 3.2 表格行高留得更舒展,适应手指 */
+body.is-mobile .file-table td,
+body.is-mobile .file-table th {
+    height: 56px;
+    padding: 0 12px;
+}
+
+/* 3.3 表格行内单元格布局：name 占满,操作占 64px */
+body.is-mobile .file-table {
+    table-layout: fixed;
+}
+body.is-mobile .file-table th:first-child,
+body.is-mobile .file-table td:first-child {
+    width: auto;
+}
+body.is-mobile .file-table th:last-child,
+body.is-mobile .file-table td:last-child {
+    width: 64px;
+    text-align: right;
+}
+
+/* 3.4 文件名 cell：允许省略,防止溢出 */
+body.is-mobile .file-name-cell {
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+}
+body.is-mobile .file-name-cell > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* 3.5 PC 端那排 hover 才出现的按钮,在移动端全部隐藏 */
+body.is-mobile .row-actions-desktop {
+    display: none !important;
+}
+
+/* 3.6 移动端更多按钮(⋮):始终显示(不需要 hover) */
+.action-more {
+    display: none;
+}
+body.is-mobile .action-more {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border: none;
+    background: transparent;
+    border-radius: 50%;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+}
+body.is-mobile .action-more:active {
+    background: rgba(68, 71, 70, 0.12);
+}
+
+/* 3.7 禁用多选：selection-bar 和 .selected 行高亮全都隐藏 */
+body.is-mobile .selection-bar {
+    display: none !important;
+}
+body.is-mobile .file-table tr.selected,
+body.is-mobile .file-table tr:hover {
+    background: transparent;
+}
+body.is-mobile .file-table tr:active {
+    background: rgba(232, 240, 254, 0.7);
+}
+
+/* ============= 4. 文本/预览排版 ============= */
+
+/* 4.1 通用长文本换行 */
+body.is-mobile .breadcrumb,
+body.is-mobile .file-name-cell,
+body.is-mobile .pinned-item-name,
+body.is-mobile .preview-filename,
+body.is-mobile .preview-md,
+body.is-mobile .preview-text,
+body.is-mobile .preview-image,
+body.is-mobile .modal-title,
+body.is-mobile .move-folder-name,
+body.is-mobile .move-crumb,
+body.is-mobile .move-chip,
+body.is-mobile .uw-item-left {
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    max-width: 100%;
+}
+
+body.is-mobile .breadcrumb {
+    /* 沿用 base 的单行布局,只缩小字号;长目录由 bc-current 省略号截短 */
+    font-size: 14px;
+    white-space: nowrap;
+    flex-wrap: nowrap;
+    word-break: normal;
+    overflow-wrap: normal;
+    word-wrap: normal;
+}
+body.is-mobile .breadcrumb > * {
+    flex-shrink: 0;
+}
+body.is-mobile .breadcrumb > .bc-current {
+    flex-shrink: 1;
+}
+
+/* 4.2 预览容器：占满宽度,允许内容换行 */
+body.is-mobile .preview-paper {
+    max-width: 100vw;
+}
+body.is-mobile .preview-image {
+    max-width: 100vw;
+    width: auto;
+    height: auto;
+}
+body.is-mobile .preview-text {
+    padding: 16px 20px;
+    max-width: 100vw;
+    max-height: calc(100vh - 56px - 32px);
+    min-width: 0;
+    white-space: pre-wrap;     /* 保留换行符,长行允许折断 */
+    font-size: 12px;
+}
+body.is-mobile .preview-md {
+    padding: 20px 24px;
+    max-width: 100vw;
+    max-height: calc(100vh - 56px - 32px);
+    min-width: 0;
+    line-height: 1.6;
+    font-size: 14px;
+}
+body.is-mobile .preview-stage {
+    padding: 8px;
+}
+
+/* 4.3 弹窗：移动端接近全屏 */
+body.is-mobile .modal {
+    width: calc(100vw - 24px);
+    max-width: 100vw;
+    max-height: calc(100vh - 24px);
+    border-radius: 16px;
+}
+
+/* ============= 5. 上传小窗贴底 ============= */
+body.is-mobile .upload-widget {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    border-radius: 12px 12px 0 0;
+    max-height: 60vh;
+}
+
+/* ============= 6. 拖拽上传覆盖物字号缩小 ============= */
+body.is-mobile .drop-overlay h2 {
+    font-size: 18px;
+    padding: 0 16px;
+    text-align: center;
+}
+body.is-mobile .drop-overlay svg {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 12px;
+}
+
+/* ============= 7. 底部 Action Sheet (行动作面板) ============= */
+
+.mobile-action-sheet-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 3000;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    animation: maskFade 0.18s ease;
+}
+
+.mobile-action-sheet {
+    width: 100vw;
+    background: #fff;
+    border-radius: 16px 16px 0 0;
+    padding: 8px 0 calc(env(safe-area-inset-bottom, 0px) + 12px);
+    max-height: 70vh;
+    overflow-y: auto;
+    animation: sheetSlideUp 0.22s ease;
+}
+
+@keyframes sheetSlideUp {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+}
+
+.mobile-action-sheet-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 20px 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 16px;
+}
+
+.mobile-action-sheet-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    max-width: 80vw;
+}
+
+.mobile-action-sheet-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    width: 100%;
+    padding: 16px 24px;        /* 大触控区域 */
+    font-size: 16px;
+    color: var(--text-main);
+    background: transparent;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+}
+
+.mobile-action-sheet-item:active {
+    background: rgba(232, 240, 254, 0.8);
+}
+
+.mobile-action-sheet-item.danger {
+    color: #d93025;
+}
+
+.mobile-action-sheet-item svg {
+    flex-shrink: 0;
+    color: var(--text-muted);
+}
+
+.mobile-action-sheet-item.danger svg {
+    color: #d93025;
+}
+
+.mobile-action-sheet-cancel {
+    margin: 8px 12px 0;
+    width: calc(100% - 24px);
+    padding: 14px 16px;
+    border: none;
+    border-radius: 12px;
+    background: #f1f3f4;
+    color: var(--text-main);
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+}
+body.is-mobile .mobile-action-sheet-cancel:active {
+    background: #e0e2e6;
 }
