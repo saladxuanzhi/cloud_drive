@@ -1770,7 +1770,17 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
             </button>` : ""}
         </header>
         <div class="preview-stage" id="previewStage">
-            <div class="preview-paper" id="previewPaper">
+            <div class="preview-loader" id="previewLoader" hidden>
+                <div class="preview-circular-progress" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                        <circle class="bg" cx="12" cy="12" r="10"></circle>
+                        <circle class="value" id="previewRing" cx="12" cy="12" r="10"></circle>
+                    </svg>
+                    <span class="preview-cp-pct" id="previewPct">0%</span>
+                </div>
+                <div class="preview-loader-text">加载中…</div>
+            </div>
+            <div class="preview-paper" id="previewPaper" hidden>
                 <div class="preview-content" id="previewContent"></div>
             </div>
         </div>`;
@@ -1778,6 +1788,8 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
 
     const stage = overlay.querySelector("#previewStage");
     const contentEl = overlay.querySelector("#previewContent");
+    const paperEl = overlay.querySelector("#previewPaper");
+    const loaderEl = overlay.querySelector("#previewLoader");
     overlay.querySelector(".preview-close").onclick = closePreviewModal;
 
     // 点击舞台空白处（不在 paper 上）关闭
@@ -1795,29 +1807,71 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
 
     if (error) {
         contentEl.innerHTML = `<div class="preview-message preview-error">${escapeHtml(error)}</div>`;
+        paperEl.hidden = false;
         return;
     }
 
     if (kind === "image") {
-        contentEl.innerHTML = `<div class="preview-loading">加载中…</div>`;
-        const img = new Image();
-        img.alt = title;
-        img.className = "preview-image";
-        img.onload = () => {
-            contentEl.innerHTML = "";
-            contentEl.appendChild(img);
-            _setupImageZoom(stage);
+        // 加载阶段：隐藏 paper，展示 loader 圆环
+        loaderEl.hidden = false;
+        paperEl.hidden = true;
+        const ringEl = loaderEl.querySelector("#previewRing");
+        const pctEl = loaderEl.querySelector("#previewPct");
+        // 与上传队列的 .circular-progress 一致：r=10，圆周约 63
+        const RING_LEN = 63;
+        const setProgress = (p) => {
+            const clamped = Math.max(0, Math.min(100, p));
+            // 到达 100% 时去掉过渡，避免“文字已 100%、圆环还在转”的延迟
+            ringEl.style.transition = clamped >= 100 ? "none" : "";
+            ringEl.style.strokeDashoffset = String(RING_LEN * (1 - clamped / 100));
+            pctEl.textContent = `${Math.round(clamped)}%`;
         };
-        img.onerror = () => {
+        setProgress(0);
+
+        // 用 XHR 拿进度事件：new Image() 没有 progress，没法反映真实加载量
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", src, true);
+        xhr.responseType = "blob";
+        xhr.onprogress = (e) => {
+            if (e.lengthComputable) {
+                setProgress((e.loaded / e.total) * 100);
+            }
+        };
+        const finishWithError = () => {
+            loaderEl.hidden = true;
+            paperEl.hidden = false;
             contentEl.innerHTML = `<div class="preview-message preview-error">无法加载图片（文件可能已损坏）</div>`;
         };
-        img.src = src;
+        xhr.onload = () => {
+            if (xhr.status < 200 || xhr.status >= 300) { finishWithError(); return; }
+            setProgress(100);
+            const blobUrl = URL.createObjectURL(xhr.response);
+            const img = new Image();
+            img.alt = title;
+            img.className = "preview-image";
+            img.onload = () => {
+                URL.revokeObjectURL(blobUrl);
+                loaderEl.hidden = true;
+                paperEl.hidden = false;
+                contentEl.innerHTML = "";
+                contentEl.appendChild(img);
+                _setupImageZoom(stage);
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(blobUrl);
+                finishWithError();
+            };
+            img.src = blobUrl;
+        };
+        xhr.onerror = finishWithError;
+        xhr.send();
         return;
     }
 
     if (kind === "text") {
         if (content !== undefined) {
             renderPreviewText(contentEl, content, { ext, isMarkdown });
+            paperEl.hidden = false;
         }
     }
 }

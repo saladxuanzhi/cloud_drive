@@ -1487,6 +1487,63 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     color: #f28b82;
 }
 
+/* 加载占位：圆环 + "加载中…"，覆盖在 paper 之上 */
+.preview-loader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    color: #cfcfcf;
+    font-size: 14px;
+    padding: 48px 32px;
+}
+
+/* 显式覆盖 hidden 属性，避免被 display: flex 抢走优先级 */
+.preview-loader[hidden],
+.preview-paper[hidden] {
+    display: none;
+}
+
+/* 圆形进度环：与上传队列的 .circular-progress 风格一致 */
+.preview-circular-progress {
+    position: relative;
+    width: 56px;
+    height: 56px;
+}
+.preview-circular-progress svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+.preview-circular-progress circle {
+    fill: none;
+    stroke-width: 2.5;
+}
+.preview-circular-progress .bg {
+    stroke: rgba(255, 255, 255, 0.12);
+}
+.preview-circular-progress .value {
+    stroke: #ececec;
+    stroke-dasharray: 63;
+    stroke-dashoffset: 63;
+    transition: stroke-dashoffset 0.15s linear;
+}
+.preview-cp-pct {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: #ececec;
+    font-variant-numeric: tabular-nums;
+}
+
+.preview-loader-text {
+    letter-spacing: 0.5px;
+}
+
 /* ================= 移动弹窗 ================= */
 .move-dialog {
     display: flex;
