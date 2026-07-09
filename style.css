@@ -319,7 +319,7 @@ body:not([data-view="files"]) .path-box:hover {
 /* 所有 span 节点:胶囊样式,默认不收缩(line-height 收紧以匹配面包屑高度) */
 .breadcrumb > span {
     cursor: pointer;
-    padding: 3px 8px;
+    padding: 8px 8px;
     border-radius: 12px;
     transition: background-color 0.15s ease, color 0.15s ease;
     flex-shrink: 0;
