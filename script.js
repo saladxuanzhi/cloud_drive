@@ -470,7 +470,36 @@ window.addEventListener("DOMContentLoaded", () => {
 
 // 浏览器前进/后退:地址栏变了但 currentPath 没变,需要重新拉取对应目录。
 // 这里不能用 pushState,否则会无限回环;由 navigateFromUrl 内部标志位保护。
+// 弹出层优先级:预览 > 操作面板 > 路由(URL 同步)。
+// closeXxxModal 在主动关闭时会 history.back(), 随之而来的 popstate 是自家副作用,
+// 用 _suppressNextPopstateForXxx 直接吞掉, 防止重复拉取目录。
 window.addEventListener("popstate", () => {
+    if (_suppressNextPopstateForPreview) {
+        _suppressNextPopstateForPreview = false;
+        return;
+    }
+    if (_suppressNextPopstateForActionSheet) {
+        _suppressNextPopstateForActionSheet = false;
+        return;
+    }
+    if (document.getElementById("previewOverlay")) {
+        _previewClosingFromPopstate = true;
+        try {
+            closePreviewModal();
+        } finally {
+            _previewClosingFromPopstate = false;
+        }
+        return;
+    }
+    if (document.querySelector(".mobile-action-sheet-overlay")) {
+        _actionSheetClosingFromPopstate = true;
+        try {
+            closeMobileActions();
+        } finally {
+            _actionSheetClosingFromPopstate = false;
+        }
+        return;
+    }
     navigateFromUrl({ replace: false });
 });
 
@@ -734,8 +763,9 @@ function sortItems() {
         if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
         let cmp = 0;
         if (sortField === "name") {
+            // numeric:true 让 file_2 排在 file_10 之前（自然排序）；sensitivity:'base' 兼容中文大小写不敏感比较。
             cmp = String(a.name || "").localeCompare(
-                String(b.name || ""), 'zh-CN', { sensitivity: 'base' });
+                String(b.name || ""), 'zh-CN', { numeric: true, sensitivity: 'base' });
         } else if (sortField === "modified") {
             // 回收站用 deleted_at 字段，files/pinned 用 modified 字段
             const aVal = Number(a.modified ?? a.deleted_at) || 0;
@@ -1275,8 +1305,16 @@ function openMobileActions(index, viewType) {
 
     const overlay = document.createElement("div");
     overlay.className = "mobile-action-sheet-overlay";
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeMobileActions(); });
-    overlay.addEventListener("touchstart", (e) => { if (e.target === overlay) closeMobileActions(); }, { passive: true });
+    // 统一使用 click 监听：不要使用 touchstart/touchend 立即关闭遮罩。
+    // 否则在移动端 300ms 幽灵点击机制下,合成 click 会在遮罩消失后命中下方元素,
+    // 造成"穿透点击"。配合 CSS touch-action:manipulation,click 几乎无延迟触发。
+    overlay.addEventListener("click", (e) => {
+        // 必须严格匹配 overlay 本身,避免点击 .mobile-action-sheet 内冒泡上来误关。
+        if (e.target !== overlay) return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeMobileActions();
+    });
 
     const sheet = document.createElement("div");
     sheet.className = "mobile-action-sheet";
@@ -1342,11 +1380,39 @@ function openMobileActions(index, viewType) {
 
     overlay.appendChild(sheet);
     document.body.appendChild(overlay);
+
+    // 让浏览器后退 / 移动端侧滑返回 / 物理返回键能关闭面板而不退到上一级路由：
+    // 打开面板时往历史栈推一条 mobileSheet 标记，popstate 监听器会优先消费它来关闭面板。
+    if (!_actionSheetHistoryActive) {
+        try {
+            window.history.pushState({ ...(window.history.state || {}), mobileSheet: true }, "");
+            _actionSheetHistoryActive = true;
+        } catch (e) {
+            console.warn("[openMobileActions] history.pushState 失败:", e);
+        }
+    }
 }
 
 function closeMobileActions() {
     const existing = document.querySelector(".mobile-action-sheet-overlay");
-    if (existing) existing.remove();
+    if (!existing) return;  // 幂等保护
+    existing.remove();
+
+    // 处理面板项与历史栈的协作：见 _actionSheetHistoryActive 注释。
+    if (_actionSheetClosingFromPopstate) {
+        // 系统返回键 / 侧滑触发：浏览器已自己回到上一项，仅清标记。
+        _actionSheetHistoryActive = false;
+    } else if (_actionSheetHistoryActive) {
+        // 点 X / 取消 / 点击遮罩空白：主动 back() 消化面板项，避免下次按返回时
+        // 再次"穿越"到这条无意义的历史项；抑制随之而来的 popstate 以防重复加载数据。
+        _actionSheetHistoryActive = false;
+        _suppressNextPopstateForActionSheet = true;
+        try {
+            window.history.back();
+        } catch (e) {
+            console.warn("[closeMobileActions] history.back 失败:", e);
+        }
+    }
 }
 
 // === 操作图标 ===
@@ -1720,10 +1786,25 @@ function closeModal() {
 let _previewKeydownHandler = null;
 let _previewWheelHandler = null;
 let _previewZoom = 1;
+// 移动端预览与浏览器历史的协作：
+// _previewHistoryActive 表示"我们已经往历史栈推过一条 preview 标记项"，
+// _previewClosingFromPopstate 表示"当前 closePreviewModal 是由 popstate 触发的"
+//   —— 此时浏览器已经自己回退到上一项，不能再 history.back()，否则会回退过头。
+// _suppressNextPopstateForPreview 表示"我们刚主动 history.back() 消化掉了预览项，
+//   随之而来的 popstate 是自家副作用，应直接吞掉、不要再走 navigateFromUrl 重新加载数据"。
+let _previewHistoryActive = false;
+let _previewClosingFromPopstate = false;
+let _suppressNextPopstateForPreview = false;
+
+// 移动端操作面板（mobile-action-sheet）与浏览器历史的协作，含义同上。
+let _actionSheetHistoryActive = false;
+let _actionSheetClosingFromPopstate = false;
+let _suppressNextPopstateForActionSheet = false;
 
 function closePreviewModal() {
     const overlay = document.getElementById("previewOverlay");
-    if (overlay) overlay.remove();
+    if (!overlay) return;  // 已经关闭，幂等保护
+    overlay.remove();
     if (_previewKeydownHandler) {
         document.removeEventListener("keydown", _previewKeydownHandler, true);
         _previewKeydownHandler = null;
@@ -1731,6 +1812,22 @@ function closePreviewModal() {
     if (_previewWheelHandler) {
         // handler 绑在 stage 上，stage 会随 overlay 一起被移除，无需解绑
         _previewWheelHandler = null;
+    }
+
+    // 处理预览项与历史栈的协作：见 _previewHistoryActive 注释。
+    if (_previewClosingFromPopstate) {
+        // 系统返回键 / 侧滑触发：浏览器已自己回到上一项，仅清标记。
+        _previewHistoryActive = false;
+    } else if (_previewHistoryActive) {
+        // 用户点 X / Esc / 点击遮罩空白：主动 back() 消化预览项，避免下次按返回时
+        // 再次"穿越"到这条无意义的历史项；抑制随之而来的 popstate 以防重复加载数据。
+        _previewHistoryActive = false;
+        _suppressNextPopstateForPreview = true;
+        try {
+            window.history.back();
+        } catch (e) {
+            console.warn("[closePreviewModal] history.back 失败:", e);
+        }
     }
     _previewZoom = 1;
 }
@@ -1760,6 +1857,17 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
     closePreviewModal();
     // 顺带关掉可能残留的重命名/移动弹窗
     closeModal();
+
+    // 让浏览器后退 / 移动端侧滑返回 / 物理返回键可以关闭预览而不是退回上一级路由：
+    // 打开预览时往历史栈推一条 preview 标记，popstate 监听器会优先消费它来关闭预览。
+    if (!_previewHistoryActive) {
+        try {
+            window.history.pushState({ ...(window.history.state || {}), preview: true }, "");
+            _previewHistoryActive = true;
+        } catch (e) {
+            console.warn("[openPreviewModal] history.pushState 失败:", e);
+        }
+    }
 
     const logoName = iconName || (kind === "image" ? "image" : "file");
     const logoSrc = `${CONFIG.API_BASE}/api/icon/${encodeURIComponent(logoName)}`;
