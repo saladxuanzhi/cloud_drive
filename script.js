@@ -1456,6 +1456,27 @@ document.addEventListener("DOMContentLoaded", () => {
     if (burger) burger.addEventListener("click", () => toggleSidebar());
     const mask = document.getElementById("sidebarMask");
     if (mask) mask.addEventListener("click", () => closeSidebar());
+
+    // 移动端：点击 sidebar 内的导航项/链接/固定项后,抽屉自动收起。
+    // 用事件委托避免给每个 onclick 单独补 closeSidebar() —— 包括
+    // 主目录 / 已固定的文件夹 / 回收站 / 回主页 / 退出登录 / 动态渲染的 pinned-item。
+    // 例外:
+    //   - .nav-expander-clickable (▶/▼ 切换 pinned 列表展开):收起会让用户看不到结果
+    //   - 「新建」按钮及其下拉菜单项:打开的是 dropdown,收起会立即丢掉菜单
+    const sidebar = document.querySelector(".sidebar");
+    if (sidebar) {
+        sidebar.addEventListener("click", (e) => {
+            if (!window.IS_MOBILE) return;
+            if (!sidebar.classList.contains("is-open")) return;
+            const navTarget = e.target.closest(".nav-item, .pinned-item");
+            if (!navTarget) return;
+            if (e.target.closest(".nav-expander-clickable")) return;
+            // 「新建」按钮(class="new-btn")和它的下拉菜单项(class="new-menu-item")
+            // 都不属于 .nav-item / .pinned-item,所以这里的 navTarget 自然为 null,
+            // 不需要在 closeSidebar() 之前再加额外判断。
+            closeSidebar();
+        });
+    }
 });
 
 // 跨断点切换时,清理掉移动端才有的抽屉状态,避免 PC 端看到奇怪的 fixed 侧边栏
