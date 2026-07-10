@@ -2008,12 +2008,24 @@ body.is-mobile .drop-overlay svg {
     width: 100vw;
     background: #fff;
     border-radius: 16px 16px 0 0;
-    padding: 8px 0 calc(env(safe-area-inset-bottom, 0px) + 12px);
+    display: flex;
+    flex-direction: column;
     max-height: 70vh;
-    overflow-y: auto;
+    overflow: hidden;
+    padding-top: 8px;        /* 顶部留白从 body 移到这里 */
     pointer-events: auto;
+    cursor: default;
     touch-action: manipulation;
     animation: sheetSlideUp 0.22s ease;
+}
+
+/* 中部列表滚动区 —— flex:1 撑满剩余高度,min-height:0 让 flex 子项可收缩到允许内容滚动 */
+.mobile-action-sheet-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    /* 底部安全距离移到这里,确保最后一项(取消按钮)在带 Home Indicator 的设备上完整可见 */
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
 }
 
 @keyframes sheetSlideUp {
@@ -2029,10 +2041,8 @@ body.is-mobile .drop-overlay svg {
     border-bottom: 1px solid var(--border);
     color: var(--text-muted);
     font-size: 16px;
-    position: sticky;
-    top: 0;
     background: #fff;
-    z-index: 1;
+    flex-shrink: 0;
 }
 
 .mobile-action-sheet-title {

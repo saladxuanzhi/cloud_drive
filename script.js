@@ -1330,6 +1330,11 @@ function openMobileActions(index, viewType) {
     head.querySelector("button").onclick = closeMobileActions;
     sheet.appendChild(head);
 
+    // 中部:列表滚动区 —— 与 header 分离,使 header 彻底脱离滚动区域,
+    // 避免 sticky 方案下"列表项穿过 header"的视觉瑕疵。
+    const body = document.createElement("div");
+    body.className = "mobile-action-sheet-body";
+
     // 操作列表:按视图构造
     const actions = [];
     if (viewType === "files") {
@@ -1367,7 +1372,7 @@ function openMobileActions(index, viewType) {
         btn.className = "mobile-action-sheet-item" + (a.danger ? " danger" : "");
         btn.innerHTML = `${a.icon}<span>${escapeHtml(a.label)}</span>`;
         btn.onclick = () => { closeMobileActions(); a.run(); };
-        sheet.appendChild(btn);
+        body.appendChild(btn);
     });
 
     // 底部:取消
@@ -1376,8 +1381,9 @@ function openMobileActions(index, viewType) {
     cancel.className = "mobile-action-sheet-cancel";
     cancel.textContent = "取消";
     cancel.onclick = closeMobileActions;
-    sheet.appendChild(cancel);
+    body.appendChild(cancel);
 
+    sheet.appendChild(body);
     overlay.appendChild(sheet);
     document.body.appendChild(overlay);
 
