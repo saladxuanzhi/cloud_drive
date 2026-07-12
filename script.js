@@ -1813,6 +1813,10 @@ function closeModal() {
 let _previewKeydownHandler = null;
 let _previewWheelHandler = null;
 let _previewZoom = 1;
+// 当前预览中的 Artplayer 实例（仅 kind=video|audio 时存在），用于关闭预览时显式 destroy 释放解码器。
+let _activeArtplayer = null;
+// artplayer.js 是否已加载完成(单次缓存)。Promise 形态便于并发请求共享同一个加载任务。
+let _artplayerLoaderPromise = null;
 // 移动端预览与浏览器历史的协作：
 // _previewHistoryActive 表示"我们已经往历史栈推过一条 preview 标记项"，
 // _previewClosingFromPopstate 表示"当前 closePreviewModal 是由 popstate 触发的"
@@ -1831,6 +1835,12 @@ let _suppressNextPopstateForActionSheet = false;
 function closePreviewModal() {
     const overlay = document.getElementById("previewOverlay");
     if (!overlay) return;  // 已经关闭，幂等保护
+    // 先释放 Artplayer(若存在)。destroy(true) 会同步清理内部 video/audio 元素
+    // 及已注册的事件,避免在 overlay 被 remove 之后解码器还在后台跑。
+    if (_activeArtplayer && _activeArtplayer !== true) {
+        try { _activeArtplayer.destroy(true); } catch (e) { console.warn("[closePreviewModal] art.destroy 失败:", e); }
+    }
+    _activeArtplayer = null;
     overlay.remove();
     if (_previewKeydownHandler) {
         document.removeEventListener("keydown", _previewKeydownHandler, true);
@@ -1873,6 +1883,85 @@ function _setupImageZoom(stage) {
         _setPreviewZoom(_previewZoom * factor);
     };
     stage.addEventListener("wheel", _previewWheelHandler, { passive: false });
+}
+
+/**
+ * 按需加载 artplayer.js（cdn.jsdelivr.net）。仅首次视频/音频预览时拉取，
+ * 后续预览复用同一份 promise。失败时抛出，调用方负责给出错误提示。
+ */
+function _loadArtplayer() {
+    if (typeof window.Artplayer !== "undefined") return Promise.resolve(window.Artplayer);
+    if (_artplayerLoaderPromise) return _artplayerLoaderPromise;
+    _artplayerLoaderPromise = new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = "https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.js";
+        s.async = true;
+        s.onload = () => {
+            if (typeof window.Artplayer !== "undefined") resolve(window.Artplayer);
+            else reject(new Error("artplayer.js 加载完成但全局变量缺失"));
+        };
+        s.onerror = () => {
+            _artplayerLoaderPromise = null;  // 下次重试
+            reject(new Error("无法加载 artplayer.js"));
+        };
+        document.head.appendChild(s);
+    });
+    return _artplayerLoaderPromise;
+}
+
+/**
+ * 在容器里实例化 Artplayer。仅保留核心播放必需/通用的开关,
+ * 移除示例中 demo-only 的组件(subtitle/settings/contextmenu/layers/quality/
+ * thumbnails/highlight/controls/icons/custom attr)。
+ *
+ * Artplayer 默认会随 <video>/<audio> 的容器尺寸自适应;这里直接把 container 放在
+ * previewContent 里,样式由 CSS 给一个最大宽高限制即可。
+ */
+function _buildArtplayer(ArtplayerCtor, container, { src, ext, title, kind }) {
+    return new ArtplayerCtor({
+        container,
+        url: src,
+        // 显式声明 MIME,避免部分浏览器把 webm/ogg 误判导致无法播放。
+        type: _artplayerMimeFor(ext, kind),
+        title,
+        volume: 0.5,
+        isLive: false,
+        muted: false,
+        autoplay: false,
+        // 视频专属开关(音频场景 Artplayer 内部会忽略,放在一起不增加风险)
+        pip: true,
+        autoSize: true,
+        autoMini: true,
+        screenshot: false,
+        setting: true,
+        loop: true,
+        flip: true,
+        playbackRate: true,
+        aspectRatio: true,
+        fullscreen: true,
+        fullscreenWeb: true,
+        miniProgressBar: true,
+        mutex: true,
+        backdrop: true,
+        playsInline: true,
+        autoPlayback: true,
+        airplay: true,
+        theme: "#23ade5",
+        lang: (navigator.language || "zh-cn").toLowerCase(),
+    });
+}
+
+function _artplayerMimeFor(ext, kind) {
+    const map = {
+        mp4: "video/mp4", m4v: "video/mp4",
+        webm: "video/webm", ogv: "video/ogg",
+        mov: "video/quicktime",
+        mp3: "audio/mpeg", wav: "audio/wav",
+        ogg: "audio/ogg", oga: "audio/ogg",
+        m4a: "audio/mp4", aac: "audio/aac",
+        opus: "audio/ogg",
+    };
+    return map[ext] || (kind === "audio" ? "audio/mpeg" : "video/mp4");
 }
 
 /**
@@ -2020,6 +2109,51 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
         return;
     }
 
+    if (kind === "video" || kind === "audio") {
+        // 走 Artplayer 流式播放：先把 paper 展开、loader 维持可见，等 Artplayer 实例化完成再隐藏。
+        paperEl.hidden = false;
+        // 给 Artplayer 一个干净的容器(div.artplayer-app 风格),避免其默认样式与 previewContent 冲突。
+        contentEl.innerHTML = "";
+        contentEl.classList.add("preview-media");
+        const playerHost = document.createElement("div");
+        playerHost.className = "preview-media-host";
+        contentEl.appendChild(playerHost);
+
+        // 任何早退路径都需要清掉 _activeArtplayer 引用 + loader,避免下次打开时残留。
+        const cleanup = (errMsg) => {
+            if (_activeArtplayer && _activeArtplayer !== true) {
+                try { _activeArtplayer.destroy(true); } catch (_) {}
+            }
+            _activeArtplayer = null;
+            loaderEl.hidden = true;
+            paperEl.hidden = false;
+            contentEl.classList.remove("preview-media");
+            if (errMsg) {
+                contentEl.innerHTML = `<div class="preview-message preview-error">${escapeHtml(errMsg)}</div>`;
+            }
+        };
+
+        _loadArtplayer().then((ArtplayerCtor) => {
+            // 加载期间用户可能已关闭预览
+            if (!document.getElementById("previewContent")) return;
+            try {
+                const art = _buildArtplayer(ArtplayerCtor, playerHost, {
+                    src, ext, title, kind,
+                });
+                _activeArtplayer = art;
+                loaderEl.hidden = true;
+            } catch (e) {
+                console.error("[openPreviewModal] Artplayer 初始化失败:", e);
+                cleanup("播放器初始化失败：" + (e && e.message ? e.message : String(e)));
+            }
+        }).catch((e) => {
+            console.error("[openPreviewModal] artplayer.js 加载失败:", e);
+            if (!document.getElementById("previewContent")) return;
+            cleanup("播放器加载失败，请检查网络后重试");
+        });
+        return;
+    }
+
     if (kind === "text") {
         if (content !== undefined) {
             renderPreviewText(contentEl, content, { ext, isMarkdown });
@@ -2112,6 +2246,7 @@ function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
 /**
  * 触发文件预览（双击文件行调用）。
  * - image: 直接打开弹窗，<img> 走 GET /api/preview?kind=image
+ * - video / audio: 直接打开弹窗，Artplayer 走 GET /api/preview?kind=video|audio
  * - text : 先 fetch JSON，再把 content 注入 <pre>
  */
 async function previewFile(item, kind) {
@@ -2121,6 +2256,19 @@ async function previewFile(item, kind) {
 
     if (kind === "image") {
         openPreviewModal({ title: item.name, kind: "image", src: url, iconName: "image" });
+        return;
+    }
+
+    if (kind === "video" || kind === "audio") {
+        // 先开 loading 弹窗（kind=video|audio 时不再走 XHR 进度，Artplayer 自己拉流），
+        // 待 Artplayer CDN 注入并实例化后再隐藏 loader。
+        openPreviewModal({
+            title: item.name,
+            kind,
+            src: url,
+            iconName: iconNameForExt(false, ext),
+            ext,
+        });
         return;
     }
 
@@ -3130,9 +3278,18 @@ const _PREVIEW_TEXT_EXTS = new Set([
     "txt","md","markdown","log","rst",
     ..._CODE_EXTS,
 ]);
+// 仅收录浏览器原生 <video> 可播放的容器;mkv/avi/flv/wmv 等无法解码,仍走下载。
+const _PREVIEW_VIDEO_EXTS = new Set([
+    "mp4","m4v","webm","ogv","mov",
+]);
+const _PREVIEW_AUDIO_EXTS = new Set([
+    "mp3","wav","ogg","oga","m4a","aac","opus",
+]);
 function canPreview(item, ext) {
     if (!item || item.is_dir) return null;
     if (_PREVIEW_IMAGE_EXTS.has(ext)) return "image";
+    if (_PREVIEW_VIDEO_EXTS.has(ext)) return "video";
+    if (_PREVIEW_AUDIO_EXTS.has(ext)) return "audio";
     if (_PREVIEW_TEXT_EXTS.has(ext)) return "text";
     return null;
 }

@@ -1353,22 +1353,119 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     padding: 24px;
 }
 
-/* 白色画布：图片预览时与图片一起被 transform: scale 缩放 */
+/* 白色画布：图片预览时与图片一起被 transform: scale 缩放
+ * line-height/font-size 归零 + vertical-align:top 是为了消除 inline-block 自身行内基线
+ * 在底部预留的 descender 空间,避免 media 预览时 paper 底部留白边 */
 .preview-paper {
     background: #ffffff;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
     display: inline-block;
+    line-height: 0;
+    font-size: 0;
+    vertical-align: top;
     transform: scale(var(--preview-zoom, 1));
     transform-origin: center center;
     transition: transform 0.06s linear;
     will-change: transform;
 }
+/* 文字类预览自身已有 line-height/font-size,需要恢复默认值避免被 paper 归零 */
+.preview-paper .preview-text,
+.preview-paper .preview-md,
+.preview-paper .preview-loading,
+.preview-paper .preview-message {
+    line-height: normal;
+    font-size: 14px;
+}
+.preview-paper .preview-text { font-size: 13px; line-height: 1.55; }
+.preview-paper .preview-md { font-size: 14px; line-height: 1.65; }
+.preview-paper .preview-message { padding: 48px 32px; }
 
 .preview-image {
     display: block;
     max-width: min(80vw, 1400px);
     max-height: calc(100vh - 56px - 48px);
     object-fit: contain;
+}
+
+/* 视频/音频预览：Artplayer 内部依赖容器尺寸。
+ * 容器给一个受约束的最大宽高,让 Artplayer 的 autoSize 自动算出合适大小,
+ * 同时保持与图片预览一致的视觉占比。
+ *
+ * 改用 block-level flex(而非 inline-flex),避免 inline-flex 行内基线在底部留下 descender,
+ * 同时强制 line-height/font-size 归零,双保险消除 paper / media 之间的底部空隙。 */
+.preview-media {
+    background: #000;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* 不缩放(避开图片预览的 --preview-zoom),只限制最大尺寸 */
+    transform: none;
+    line-height: 0;
+    font-size: 0;
+    width: min(80vw, 1100px);
+    height: min(70vh, 720px);
+    max-width: min(80vw, 1100px);
+    max-height: min(70vh, 720px);
+}
+.preview-media-host {
+    /* 给 Artplayer 子层提供绝对定位上下文,自身仍按 100% 撑满 .preview-media */
+    position: relative;
+    width: 100%;
+    height: 100%;
+    line-height: 0;
+    font-size: 0;
+}
+/* 仅对媒体预览让 paper 稍稍上移,避免控制条紧贴 stage 底沿 / 视觉过中 */
+.preview-paper:has(.preview-media) {
+    margin-top: -100px;
+}
+/* Artplayer 自身 .art-video-player 会占满父容器;此处只覆盖背景色与默认 box */
+.preview-media .art-video-player {
+    background: #000;
+}
+
+/* 强制让 Artplayer 的主容器(.art-video-player)绝对定位并撑满 .preview-media-host,
+ * 杜绝 autoSize / aspectRatio 等内部计算把播放器高度算小,在底部留出大段空隙。
+ * 仅强制最外层 .art-video-player,内部各层(控制条 / 字幕 / 蒙层 / 海报等)仍由 Artplayer
+ * 自己的定位规则控制,避免把 .art-control 这类原本 bottom:0 的层强行拉成 inset:0。 */
+.preview-media-host > .art-video-player {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: block !important;
+    line-height: 0 !important;
+    font-size: 0 !important;
+    aspect-ratio: auto !important;
+}
+
+/* 兜底:Artplayer 默认就把这些层定位为 absolute;此处只是确保它们不会因为父级
+ * 行内布局产生额外的 baseline 留白(继承自 preview-media 的 line-height: 0 即可)。
+ * 不再用 inset:0 覆盖 Artplayer 自身的 top/bottom 定位。 */
+.preview-media-host .art-subtitle,
+.preview-media-host .art-subtitle-show,
+.preview-media-host .art-layer,
+.preview-media-host .art-layer-show,
+.preview-media-host .art-backdrop,
+.preview-media-host .art-control,
+.preview-media-host .art-control-show,
+.preview-media-host .art-mask,
+.preview-media-host .art-mask-show {
+    margin: 0 !important;
+    padding: 0 !important;
+    line-height: 0 !important;
+    font-size: 0 !important;
+}
+
+/* 错误态沿用原有 preview-message */
+.preview-media .preview-message {
+    color: #ececec;
 }
 
 .preview-text {

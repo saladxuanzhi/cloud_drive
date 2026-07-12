@@ -49,6 +49,8 @@ DIRECT_DOWNLOAD_TTL = int(os.getenv("DIRECT_DOWNLOAD_TTL", "60"))      # 60 秒
 FOLDER_DOWNLOAD_LIMIT = int(os.getenv("FOLDER_DOWNLOAD_LIMIT", str(200 * 1024 * 1024)))  # 200MB
 TEXT_PREVIEW_LIMIT = int(os.getenv("TEXT_PREVIEW_LIMIT", str(2 * 1024 * 1024)))         # 2MB
 IMAGE_PREVIEW_LIMIT = int(os.getenv("IMAGE_PREVIEW_LIMIT", str(50 * 1024 * 1024)))       # 50MB
+# 视频/音频预览上限:足够覆盖常见视频;超出后前端拿到 413 让用户改用下载。
+MEDIA_PREVIEW_LIMIT = int(os.getenv("MEDIA_PREVIEW_LIMIT", str(500 * 1024 * 1024)))      # 500MB
 BINARY_SNIFF_BYTES = 8 * 1024
 MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", str(1 * 1024 * 1024 * 1024)))        # 1GB/文件
 UPLOAD_CHUNK_SIZE = 32 * 1024
@@ -85,6 +87,24 @@ _IMAGE_MIME = {
     "png": "image/png",  "gif":  "image/gif",
     "webp": "image/webp",
     "bmp": "image/bmp",  "ico":  "image/x-icon",
+}
+# 仅收录浏览器原生 <video>/<audio> 真正能播放的容器/编码;其余扩展(mkv/avi/flv/wmv/flac/wma 等)
+# 不进预览,改让前端走下载路径,避免前端拿到的 URL 无法解码。
+_VIDEO_MIME = {
+    "mp4": "video/mp4",
+    "m4v": "video/mp4",
+    "webm": "video/webm",
+    "ogv": "video/ogg",
+    "mov": "video/quicktime",
+}
+_AUDIO_MIME = {
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+    "ogg": "audio/ogg",
+    "oga": "audio/ogg",
+    "m4a": "audio/mp4",
+    "aac": "audio/aac",
+    "opus": "audio/ogg",
 }
 # 允许预览的文本/代码/配置扩展。lower-case 比较。
 _TEXT_EXTS = {
@@ -1053,13 +1073,15 @@ def download_file(ticket: str, background: BackgroundTasks, request: Request):
 @app.get("/api/preview")
 def preview_file(path: str = "", kind: str = "image", request: Request = None):
     """读取并返回单文件内容用于前端预览。
-    - kind=image: 流式返回图像字节(FileResponse),设置正确的 Content-Type。
+    - kind=image : 流式返回图像字节(FileResponse),设置正确的 Content-Type。
       (注:不再支持 svg 预览,避免 SVG XSS 风险)
-    - kind=text : 返回 JSON { content, size, truncated }。超过 2 MB → 413;含 NUL → 415。
+    - kind=video / audio : 流式返回音视频字节(FileResponse);Starlette 自动处理
+      HTTP Range,前端可拖动进度条分段拉取。
+    - kind=text  : 返回 JSON { content, size, truncated }。超过 2 MB → 413;含 NUL → 415。
     """
     _require_rate(_rate_list, request)
-    if kind not in ("image", "text"):
-        raise HTTPException(400, "kind 必须为 image 或 text")
+    if kind not in ("image", "text", "video", "audio"):
+        raise HTTPException(400, "kind 必须为 image / text / video / audio")
     target = get_safe_path(path)
     if not target.exists():
         raise HTTPException(404, "文件不存在")
@@ -1081,6 +1103,20 @@ def preview_file(path: str = "", kind: str = "image", request: Request = None):
                 },
             )
         return FileResponse(target, media_type=_IMAGE_MIME[ext])
+
+    if kind in ("video", "audio"):
+        mime_map = _VIDEO_MIME if kind == "video" else _AUDIO_MIME
+        if ext not in mime_map:
+            raise HTTPException(415, f"浏览器无法播放该{ '视频' if kind == 'video' else '音频' }格式:{ext}")
+        if size > MEDIA_PREVIEW_LIMIT:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": f"文件过大(>{MEDIA_PREVIEW_LIMIT // 1024 // 1024}MB),无法预览,请改用下载",
+                    "size": size,
+                },
+            )
+        return FileResponse(target, media_type=mime_map[ext])
 
     # kind == "text"
     if ext and ext not in _TEXT_EXTS:
