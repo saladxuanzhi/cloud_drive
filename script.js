@@ -35,7 +35,6 @@ function encodePathForUrl(path) {
         let bin = "";
         for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
         const b64 = btoa(bin);
-        // 转 URL-safe 字符集,移除 padding(= 在 URL 里需要再编码,不优雅)
         const urlSafe = b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
         return "b64:" + urlSafe;
     } catch (_) {
@@ -3256,7 +3255,6 @@ function getIcon(isDir, ext) {
 
 // 单一来源：判断文件是否可预览以及属于哪一类。
 // 与后端 _IMAGE_MIME / _TEXT_EXTS 保持一致。
-// 注意:已移除 svg(SVG 内嵌脚本可通过 <img> 触发 XSS,改为只能下载不能预览)
 const _PREVIEW_IMAGE_EXTS = new Set([
     "jpg","jpeg","png","gif","webp","bmp","ico"
 ]);
