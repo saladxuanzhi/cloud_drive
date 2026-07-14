@@ -2280,6 +2280,11 @@ async function previewFile(item, kind) {
         iconName: iconNameForExt(false, ext),
         ext,
     });
+    // 异步 fetch 期间显示 loader 圆环，避免预览区空白
+    const loaderEl = document.getElementById("previewLoader");
+    const paperEl = document.getElementById("previewPaper");
+    if (loaderEl) loaderEl.hidden = false;
+    if (paperEl) paperEl.hidden = true;
     try {
         const res = await fetch(url);
         const data = await res.json().catch(() => ({}));
@@ -2288,14 +2293,21 @@ async function previewFile(item, kind) {
         if (!res.ok) {
             const msg = (data && (data.error || data.detail)) || `HTTP ${res.status}`;
             contentEl.innerHTML = `<div class="preview-message preview-error">${escapeHtml(msg)}</div>`;
+            if (loaderEl) loaderEl.hidden = true;
+            if (paperEl) paperEl.hidden = false;
             return;
         }
         renderPreviewText(contentEl, data.content || "", { ext, isMarkdown: ext === "md" || ext === "markdown" });
+        // fetch 返回后必须取消 paper 的 hidden,否则 paper 整层保持 display:none,
+        if (loaderEl) loaderEl.hidden = true;
+        if (paperEl) paperEl.hidden = false;
     } catch (e) {
         const contentEl = document.getElementById("previewContent");
         if (contentEl) {
             contentEl.innerHTML = `<div class="preview-message preview-error">加载失败：${escapeHtml(e.message || String(e))}</div>`;
         }
+        if (loaderEl) loaderEl.hidden = true;
+        if (paperEl) paperEl.hidden = false;
     }
 }
 
