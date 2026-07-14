@@ -1387,6 +1387,59 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     object-fit: contain;
 }
 
+/* 图片预览左右翻页按钮：absolute 贴在屏幕(stage)两侧,垂直居中。
+ * 与图片本体布局无关——不参与 flex,不被图片宽度拉扯,固定在视口边缘便于快速定位。 */
+.preview-nav-btn {
+    position: absolute;
+    top: 50%;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;          /* 正圆形背景 */
+    border: 2px solid rgba(255, 255, 255, 0.9); /* 白色圆形边框 */
+    background: rgba(0, 0, 0, 0.35);
+    color: #ececec;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 2;
+    transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    /* 防止点击穿透到 paper 上的双击/拖拽 */
+    user-select: none;
+    /* 始终让按钮的"圆心"对齐到 stage 中线:translateY(-50%) 反抵消 top:50% 自身高度的偏移 */
+    transform: translateY(-50%);
+}
+.preview-nav-prev {
+    left: 24px;
+}
+.preview-nav-next {
+    right: 24px;
+}
+.preview-nav-btn:hover {
+    background: rgba(0, 0, 0, 0.6);
+    border-color: #ffffff;
+    transform: translateY(-50%) scale(1.06);
+}
+.preview-nav-btn:active {
+    transform: translateY(-50%) scale(0.96);
+}
+.preview-nav-btn svg {
+    fill: #ececec;
+    pointer-events: none;
+}
+/* 整组隐藏(列表 ≤ 1 时整体消失,而不是留一个灰按钮) */
+.preview-nav-btn[hidden] { display: none !important; }
+/* 边界禁用态:首/末位置的按钮仍可见但失活,保持 UI 直观(让用户知道方向存在、只是到了边界) */
+.preview-nav-btn:disabled {
+    opacity: 0.32;
+    cursor: not-allowed;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.32);
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
 /* 视频/音频预览：Artplayer 内部依赖容器尺寸。
  * 容器给一个受约束的最大宽高,让 Artplayer 的 autoSize 自动算出合适大小,
  * 同时保持与图片预览一致的视觉占比。
@@ -2054,6 +2107,18 @@ body.is-mobile .preview-md {
 }
 body.is-mobile .preview-stage {
     padding: 8px;
+}
+/* 移动端不显示左右翻页按钮,改用 touch swipe gesture 翻页(见 _setupImageSwipe)。
+ * 主体隐藏逻辑由 .preview-nav-btn[hidden] 与 _updatePreviewNavButtons 一起管。 */
+body.is-mobile .preview-nav-btn {
+    display: none !important;
+}
+/* 窄屏兜底:即使不是移动端,宽度 < 920px 时也不显示按钮,
+ * 退化到纯键盘/触屏滑动,避免按钮遮挡小尺寸图片。 */
+@media (max-width: 920px) {
+    .preview-nav-btn {
+        display: none !important;
+    }
 }
 
 /* 4.3 弹窗：移动端接近全屏 */

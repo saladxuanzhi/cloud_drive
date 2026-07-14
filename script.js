@@ -1826,6 +1826,20 @@ let _previewHistoryActive = false;
 let _previewClosingFromPopstate = false;
 let _suppressNextPopstateForPreview = false;
 
+// 图片预览翻页状态：
+// _previewImageList    当前文件夹中所有可预览图片(currentItemsList 中 is_dir=false 且可作为 image 预览的)
+// _previewImageIndex   当前正在显示的图片在 _previewImageList 中的索引
+// 仅在 _previewImageList.length > 1 时启用翻页按钮,避免单图文件夹抖动
+let _previewImageList = [];
+let _previewImageIndex = -1;
+
+// 图片加载请求竞态保护：快速连切图片时(键盘 ← → 或移动端滑动),
+// 旧 XHR 还在飞;若不作处理,旧响应可能在新响应之后到达,覆盖刚显示好的最新图。
+// 解决:每次 _loadPreviewImage 调用先 xhr.abort() 旧请求;
+// 再用 _previewImageReqToken 单调递增,onload/onerror 比较 token,过期回调直接忽略。
+let _previewImageXhr = null;
+let _previewImageReqToken = 0;
+
 // 移动端操作面板（mobile-action-sheet）与浏览器历史的协作，含义同上。
 let _actionSheetHistoryActive = false;
 let _actionSheetClosingFromPopstate = false;
@@ -1849,6 +1863,11 @@ function closePreviewModal() {
         // handler 绑在 stage 上，stage 会随 overlay 一起被移除，无需解绑
         _previewWheelHandler = null;
     }
+    // 取消仍在飞行的图片请求,避免 onload 在 overlay 被移除之后回写 DOM
+    if (_previewImageXhr) {
+        try { _previewImageXhr.abort(); } catch (_) {}
+        _previewImageXhr = null;
+    }
 
     // 处理预览项与历史栈的协作：见 _previewHistoryActive 注释。
     if (_previewClosingFromPopstate) {
@@ -1866,6 +1885,9 @@ function closePreviewModal() {
         }
     }
     _previewZoom = 1;
+    // 重置图片翻页状态,避免下次打开非图片预览时旧 list/index 残留干扰
+    _previewImageList = [];
+    _previewImageIndex = -1;
 }
 
 function _setPreviewZoom(z) {
@@ -1882,6 +1904,233 @@ function _setupImageZoom(stage) {
         _setPreviewZoom(_previewZoom * factor);
     };
     stage.addEventListener("wheel", _previewWheelHandler, { passive: false });
+}
+
+/**
+ * 在已有的 preview overlay 里加载并显示一张图片。
+ * 同时支持首次打开与导航切换,共用同一套 XHR 进度环 + _setupImageZoom,
+ * 避免 overlay 销毁/重建带来的闪烁、artplayer 重建、history 项污染等副作用。
+ *
+ * 注意:切换前后 zoom 会回到 1,旧的 wheel 监听器也会被显式移除,
+ * 否则多次调用 _setupImageZoom 会在 stage 上累加 listener,zoom 步进翻倍。
+ *
+ * 快速连切(键盘连按 ← / →,或移动端快速滑动)时,旧 XHR 还没完成就被新请求覆盖。
+ * 用 _previewImageReqToken 单调递增 + xhr.abort() 旧请求,避免旧响应回写到 DOM。
+ */
+function _loadPreviewImage({ title, src, contentEl, paperEl, loaderEl, stage }) {
+    // 取消上一次仍在飞行的请求,丢弃其回调
+    if (_previewImageXhr) {
+        try { _previewImageXhr.abort(); } catch (_) {}
+        _previewImageXhr = null;
+    }
+
+    // 加载阶段：隐藏 paper，展示 loader 圆环
+    loaderEl.hidden = false;
+    paperEl.hidden = true;
+
+    const ringEl = loaderEl.querySelector("#previewRing");
+    const pctEl = loaderEl.querySelector("#previewPct");
+    // 与上传队列的 .circular-progress 一致：r=10，圆周约 63
+    const RING_LEN = 63;
+    const setProgress = (p) => {
+        const clamped = Math.max(0, Math.min(100, p));
+        // 到达 100% 时去掉过渡，避免"文字已 100%、圆环还在转"的延迟
+        ringEl.style.transition = clamped >= 100 ? "none" : "";
+        ringEl.style.strokeDashoffset = String(RING_LEN * (1 - clamped / 100));
+        pctEl.textContent = `${Math.round(clamped)}%`;
+    };
+    setProgress(0);
+
+    // 切图前重置 zoom + 清理旧 wheel handler,避免 _setupImageZoom 在同一 stage 上叠加监听器
+    _setPreviewZoom(1);
+    if (_previewWheelHandler) {
+        try { stage.removeEventListener("wheel", _previewWheelHandler); } catch (_) {}
+        _previewWheelHandler = null;
+    }
+
+    // 取本次请求的 token;后续 onload/onerror 与 _previewImageReqToken 比对,过期直接 return
+    const myToken = ++_previewImageReqToken;
+    const isStale = () => myToken !== _previewImageReqToken;
+
+    // 用 XHR 拿进度事件：new Image() 没有 progress，没法反映真实加载量
+    const xhr = new XMLHttpRequest();
+    _previewImageXhr = xhr;
+    xhr.open("GET", src, true);
+    xhr.responseType = "blob";
+    xhr.onprogress = (e) => {
+        if (isStale()) return;
+        if (e.lengthComputable) {
+            setProgress((e.loaded / e.total) * 100);
+        }
+    };
+    const finishWithError = () => {
+        if (isStale()) return;
+        loaderEl.hidden = true;
+        paperEl.hidden = false;
+        contentEl.innerHTML = `<div class="preview-message preview-error">无法加载图片(文件可能已损坏)</div>`;
+    };
+    xhr.onload = () => {
+        // 哪怕 token 已过期,blob URL 也得释放,避免泄漏
+        const blobUrl = URL.createObjectURL(xhr.response);
+        if (isStale()) { URL.revokeObjectURL(blobUrl); return; }
+        if (xhr.status < 200 || xhr.status >= 300) { finishWithError(); return; }
+        setProgress(100);
+        const img = new Image();
+        img.alt = title;
+        img.className = "preview-image";
+        img.onload = () => {
+            URL.revokeObjectURL(blobUrl);
+            if (isStale()) return;
+            loaderEl.hidden = true;
+            paperEl.hidden = false;
+            contentEl.innerHTML = "";
+            contentEl.appendChild(img);
+            _setupImageZoom(stage);
+        };
+        img.onerror = () => {
+            URL.revokeObjectURL(blobUrl);
+            if (isStale()) return;
+            finishWithError();
+        };
+        img.src = blobUrl;
+    };
+    xhr.onerror = () => { if (isStale()) return; finishWithError(); };
+    // 主动 abort 时安静吞掉,不显示错误
+    xhr.onabort = () => {};
+    xhr.send();
+}
+
+/**
+ * 打开图片预览时,基于当前目录列表(currentItemsList) 计算可作为图片预览的全部条目,
+ * 并把当前 item 在该子集中的索引写入 _previewImageIndex。
+ * 调用前提:_previewImageList 为空或与 currentItemsList 已脱钩(list 的元素不会被外部 mutate)。
+ *
+ * 不强依赖 getIconName/canPreview 的目录一致:currentItemsList 与打开预览时的视图同源。
+ */
+function _buildPreviewImageList(currentItemName) {
+    const list = [];
+    let idx = -1;
+    if (Array.isArray(currentItemsList)) {
+        currentItemsList.forEach((it) => {
+            if (!it || it.is_dir) return;
+            const ext = (String(it.name).split(".").pop() || "").toLowerCase();
+            if (canPreview(it, ext) === "image") {
+                if (it.name === currentItemName) idx = list.length;
+                list.push(it);
+            }
+        });
+    }
+    _previewImageList = list;
+    _previewImageIndex = idx;
+}
+
+/**
+ * 同步 nav 按钮的禁用态:列表长度 ≤ 1 时双侧都禁用,否则只在首/末边界禁用对应侧。
+ * 同时维护按钮的 hidden 状态(列表为空/单图时整组隐藏)。
+ */
+function _updatePreviewNavButtons() {
+    const overlay = document.getElementById("previewOverlay");
+    if (!overlay) return;
+    const prevBtn = overlay.querySelector(".preview-nav-prev");
+    const nextBtn = overlay.querySelector(".preview-nav-next");
+    if (!prevBtn || !nextBtn) return;
+
+    const count = _previewImageList.length;
+    if (count <= 1) {
+        prevBtn.hidden = true;
+        nextBtn.hidden = true;
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
+        return;
+    }
+    prevBtn.hidden = false;
+    nextBtn.hidden = false;
+    const atStart = _previewImageIndex <= 0;
+    const atEnd = _previewImageIndex >= count - 1;
+    prevBtn.disabled = atStart;
+    nextBtn.disabled = atEnd;
+}
+
+/**
+ * 切换到当前图片的前/后一张(delta = -1 / +1)。
+ * 不在边界时:重置 zoom、清旧 wheel handler、加载新图,并刷新顶部文件名 + 按钮状态。
+ * 在边界或仅有 1 张图片时静默返回,不做任何 DOM 变更。
+ */
+function _navigatePreviewImage(delta) {
+    if (!delta || _previewImageList.length <= 1) return;
+    const newIdx = _previewImageIndex + delta;
+    if (newIdx < 0 || newIdx >= _previewImageList.length) return;
+    const item = _previewImageList[newIdx];
+    if (!item) return;
+
+    const overlay = document.getElementById("previewOverlay");
+    if (!overlay) return;
+
+    _previewImageIndex = newIdx;
+
+    const stage = overlay.querySelector("#previewStage");
+    const contentEl = overlay.querySelector("#previewContent");
+    const paperEl = overlay.querySelector("#previewPaper");
+    const loaderEl = overlay.querySelector("#previewLoader");
+    const filenameEl = overlay.querySelector(".preview-filename");
+    if (filenameEl) {
+        filenameEl.textContent = item.name;
+        filenameEl.setAttribute("title", item.name);
+    }
+
+    const relPath = joinPath(currentPath, item.name);
+    const url = `${CONFIG.API_BASE}/api/preview?path=${encodeURIComponent(relPath)}&kind=image`;
+    _loadPreviewImage({ title: item.name, src: url, contentEl, paperEl, loaderEl, stage });
+    _updatePreviewNavButtons();
+}
+
+/**
+ * 移动端图片预览左右滑动翻页手势。
+ * 仅在 _previewImageList.length > 1 时生效(单图文件夹不挂监听,减少无意义的事件触发)。
+ * 阈值判定:水平位移 ≥ 50px 且明显大于垂直位移(>1.5 倍 + 绝对值 ≤ 80),才视为一次有效滑动;
+ * 避免下拉刷新 / 上下滚动 / 偶尔的横向抖动误触发翻页。
+ *
+ * 同一个 stage 只挂一次监听(dataset 标记),多次 _loadPreviewImage 不会叠加。
+ * 滑动方向:左滑(dx < 0)→ 下一张;右滑(dx > 0)→ 上一张。
+ */
+function _setupImageSwipe(stage) {
+    if (!stage || stage.dataset.swipeBound === "1") return;
+    stage.dataset.swipeBound = "1";
+
+    const SWIPE_THRESHOLD = 50;   // 最小水平位移(px)
+    const VERTICAL_LIMIT = 80;    // 允许的最大垂直位移(px)
+
+    let startX = 0;
+    let startY = 0;
+    let tracking = false;
+
+    stage.addEventListener("touchstart", (e) => {
+        // 仅响应单指,避免多指捏合 / 多点操作误触
+        if (!e.touches || e.touches.length !== 1) { tracking = false; return; }
+        const t = e.touches[0];
+        startX = t.clientX;
+        startY = t.clientY;
+        tracking = true;
+    }, { passive: true });
+
+    stage.addEventListener("touchend", (e) => {
+        if (!tracking) return;
+        tracking = false;
+        if (_previewImageList.length <= 1) return;
+        const t = e.changedTouches && e.changedTouches[0];
+        if (!t) return;
+
+        const dx = t.clientX - startX;
+        const dy = t.clientY - startY;
+        // 水平位移够大 + 明显大于垂直位移,才判定为水平滑动
+        if (Math.abs(dx) >= SWIPE_THRESHOLD &&
+            Math.abs(dx) > Math.abs(dy) * 1.5 &&
+            Math.abs(dy) <= VERTICAL_LIMIT) {
+            _navigatePreviewImage(dx < 0 ? 1 : -1);
+        }
+    }, { passive: true });
+    // 用户中途取消(touchcancel)时,丢弃这次追踪,避免误触发
+    stage.addEventListener("touchcancel", () => { tracking = false; }, { passive: true });
 }
 
 /**
@@ -1967,8 +2216,9 @@ function _artplayerMimeFor(ext, kind) {
  * 打开文件预览。kind=image 时 src 是后端 URL，浏览器直接渲染；
  * kind=text 时由调用方预先 fetch 拿到 content 再传入。
  * iconName 决定左上角 logo（默认 image / file）。
+ * item 可选:传入后用于建立图片翻页状态(同一文件夹下前后切换)。
  */
-function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
+function openPreviewModal({ title, kind, src, content, error, iconName, ext, item }) {
     closePreviewModal();
     // 顺带关掉可能残留的重命名/移动弹窗
     closeModal();
@@ -2010,6 +2260,9 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
             </button>` : ""}
         </header>
         <div class="preview-stage" id="previewStage">
+            <div class="preview-paper" id="previewPaper" hidden>
+                <div class="preview-content" id="previewContent"></div>
+            </div>
             <div class="preview-loader" id="previewLoader" hidden>
                 <div class="preview-circular-progress" aria-hidden="true">
                     <svg viewBox="0 0 24 24">
@@ -2020,9 +2273,13 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
                 </div>
                 <div class="preview-loader-text">加载中…</div>
             </div>
-            <div class="preview-paper" id="previewPaper" hidden>
-                <div class="preview-content" id="previewContent"></div>
-            </div>
+            <!-- 图片翻页按钮：absolute 贴屏幕两侧,_updatePreviewNavButtons 在 kind=image 且列表 > 1 时清掉 hidden -->
+            <button class="preview-nav-btn preview-nav-prev" type="button" aria-label="上一张" title="上一张(←)" data-tooltip="上一张(←)" hidden>
+                <svg focusable="false" viewBox="0 -960 960 960" height="24" width="24" aria-hidden="true"><path d="M400-240L160-480L400-720l56,58L314-520H800v80H314L456-298l-56,58Z"></path></svg>
+            </button>
+            <button class="preview-nav-btn preview-nav-next" type="button" aria-label="下一张" title="下一张(→)" data-tooltip="下一张(→)" hidden>
+                <svg height="24" viewBox="0 0 24 24" width="24px" focusable="false" aria-hidden="true"><path d="M14 6l-1.41 1.41L16.17 11H4v2h12.17l-3.58 3.59L14 18l6-6z"></path></svg>
+            </button>
         </div>`;
     document.body.appendChild(overlay);
 
@@ -2030,16 +2287,56 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
     const contentEl = overlay.querySelector("#previewContent");
     const paperEl = overlay.querySelector("#previewPaper");
     const loaderEl = overlay.querySelector("#previewLoader");
+    const prevBtn = overlay.querySelector(".preview-nav-prev");
+    const nextBtn = overlay.querySelector(".preview-nav-next");
     overlay.querySelector(".preview-close").onclick = closePreviewModal;
+
+    // 图片翻页:用 mousedown 而不是 click,避免点按钮的合成 click 命中下方 paper 触发关闭逻辑。
+    // (overlay 自带的 mousedown 点击空白关闭不会受影响,因为按钮内部的 mousedown 由 stopPropagation 阻断冒泡。)
+    if (prevBtn) {
+        prevBtn.addEventListener("mousedown", (e) => {
+            e.stopPropagation();
+        });
+        prevBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            _navigatePreviewImage(-1);
+        });
+    }
+    if (nextBtn) {
+        nextBtn.addEventListener("mousedown", (e) => {
+            e.stopPropagation();
+        });
+        nextBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            _navigatePreviewImage(1);
+        });
+    }
 
     // 点击舞台空白处（不在 paper 上）关闭
     overlay.addEventListener("mousedown", (e) => {
         if (e.target === overlay || e.target === stage) closePreviewModal();
     });
 
-    // ESC 关闭（capture 阶段，与 openModal 同样的优先级）
+    // ESC 关闭 + 上下/前后箭头翻页（仅图片预览且列表 > 1 时启用；capture 阶段拦截）
     _previewKeydownHandler = (e) => {
-        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePreviewModal(); }
+        if (e.key === "Escape") {
+            e.preventDefault(); e.stopPropagation();
+            closePreviewModal();
+            return;
+        }
+        // 图片左右翻页：仅当 _previewImageList 长度 > 1 时响应;否则不会进入任何分支
+        if (_previewImageList.length > 1) {
+            if (e.key === "ArrowLeft") {
+                e.preventDefault(); e.stopPropagation();
+                _navigatePreviewImage(-1);
+                return;
+            }
+            if (e.key === "ArrowRight") {
+                e.preventDefault(); e.stopPropagation();
+                _navigatePreviewImage(1);
+                return;
+            }
+        }
     };
     document.addEventListener("keydown", _previewKeydownHandler, true);
 
@@ -2052,59 +2349,18 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext }) {
     }
 
     if (kind === "image") {
-        // 加载阶段：隐藏 paper，展示 loader 圆环
-        loaderEl.hidden = false;
-        paperEl.hidden = true;
-        const ringEl = loaderEl.querySelector("#previewRing");
-        const pctEl = loaderEl.querySelector("#previewPct");
-        // 与上传队列的 .circular-progress 一致：r=10，圆周约 63
-        const RING_LEN = 63;
-        const setProgress = (p) => {
-            const clamped = Math.max(0, Math.min(100, p));
-            // 到达 100% 时去掉过渡，避免“文字已 100%、圆环还在转”的延迟
-            ringEl.style.transition = clamped >= 100 ? "none" : "";
-            ringEl.style.strokeDashoffset = String(RING_LEN * (1 - clamped / 100));
-            pctEl.textContent = `${Math.round(clamped)}%`;
-        };
-        setProgress(0);
-
-        // 用 XHR 拿进度事件：new Image() 没有 progress，没法反映真实加载量
-        const xhr = new XMLHttpRequest();
-        xhr.open("GET", src, true);
-        xhr.responseType = "blob";
-        xhr.onprogress = (e) => {
-            if (e.lengthComputable) {
-                setProgress((e.loaded / e.total) * 100);
-            }
-        };
-        const finishWithError = () => {
-            loaderEl.hidden = true;
-            paperEl.hidden = false;
-            contentEl.innerHTML = `<div class="preview-message preview-error">无法加载图片（文件可能已损坏）</div>`;
-        };
-        xhr.onload = () => {
-            if (xhr.status < 200 || xhr.status >= 300) { finishWithError(); return; }
-            setProgress(100);
-            const blobUrl = URL.createObjectURL(xhr.response);
-            const img = new Image();
-            img.alt = title;
-            img.className = "preview-image";
-            img.onload = () => {
-                URL.revokeObjectURL(blobUrl);
-                loaderEl.hidden = true;
-                paperEl.hidden = false;
-                contentEl.innerHTML = "";
-                contentEl.appendChild(img);
-                _setupImageZoom(stage);
-            };
-            img.onerror = () => {
-                URL.revokeObjectURL(blobUrl);
-                finishWithError();
-            };
-            img.src = blobUrl;
-        };
-        xhr.onerror = finishWithError;
-        xhr.send();
+        // 基于当前目录列表建立图片导航状态(item 缺失则不启用翻页)
+        if (item && item.name) {
+            _buildPreviewImageList(item.name);
+        } else {
+            _previewImageList = [];
+            _previewImageIndex = -1;
+        }
+        // 同步翻页按钮 visible / disabled 态(列表 ≤ 1 时整体隐藏)
+        _updatePreviewNavButtons();
+        _loadPreviewImage({ title, src, contentEl, paperEl, loaderEl, stage });
+        // 移动端走 touch swipe gesture 翻页(PC 端也有键盘 ← → + 按钮,这里只补齐触屏)
+        _setupImageSwipe(stage);
         return;
     }
 
@@ -2254,7 +2510,8 @@ async function previewFile(item, kind) {
     const ext = item.name.split(".").pop().toLowerCase();
 
     if (kind === "image") {
-        openPreviewModal({ title: item.name, kind: "image", src: url, iconName: "image" });
+        // 传 item 给 openPreviewModal,用于建立"同文件夹内前后图片翻页"状态
+        openPreviewModal({ title: item.name, kind: "image", src: url, iconName: "image", item });
         return;
     }
 
