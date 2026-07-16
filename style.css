@@ -1443,9 +1443,7 @@ body.is-mobile .bc-ellipsis-dropdown-item {
 /* 视频/音频预览：Artplayer 内部依赖容器尺寸。
  * 容器给一个受约束的最大宽高,让 Artplayer 的 autoSize 自动算出合适大小,
  * 同时保持与图片预览一致的视觉占比。
- *
- * 改用 block-level flex(而非 inline-flex),避免 inline-flex 行内基线在底部留下 descender,
- * 同时强制 line-height/font-size 归零,双保险消除 paper / media 之间的底部空隙。 */
+ * 改用 block-level flex(而非 inline-flex),避免 inline-flex 行内基线在底部留下 descender */
 .preview-media {
     background: #000;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
@@ -1455,7 +1453,6 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     /* 不缩放(避开图片预览的 --preview-zoom),只限制最大尺寸 */
     transform: none;
     line-height: 0;
-    font-size: 0;
     width: min(80vw, 1100px);
     height: min(70vh, 720px);
     max-width: min(80vw, 1100px);
@@ -1467,7 +1464,6 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     width: 100%;
     height: 100%;
     line-height: 0;
-    font-size: 0;
 }
 /* 仅对媒体预览让 paper 稍稍上移,避免控制条紧贴 stage 底沿 / 视觉过中 */
 .preview-paper:has(.preview-media) {
@@ -1494,7 +1490,6 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     padding: 0 !important;
     display: block !important;
     line-height: 0 !important;
-    font-size: 0 !important;
     aspect-ratio: auto !important;
 }
 
@@ -1513,7 +1508,6 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     margin: 0 !important;
     padding: 0 !important;
     line-height: 0 !important;
-    font-size: 0 !important;
 }
 
 /* 错误态沿用原有 preview-message */
