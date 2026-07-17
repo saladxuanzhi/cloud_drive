@@ -311,7 +311,6 @@ body:not([data-view="files"]) .path-box:hover {
     font-weight: 400;
     display: flex;
     align-items: center;
-    gap: 4px;
     color: var(--text-muted);
     width: 100%;
     min-width: 0;
@@ -489,7 +488,6 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     min-width: 0;
     flex-shrink: 1;
     max-width: 100%;
-    padding-left: 4px;
 }
 
 /* 非 files 视图下的固定文字(回收站 / 已固定的文件夹),仅展示不可交互 */
@@ -1725,7 +1723,7 @@ body.is-mobile .bc-ellipsis-dropdown-item {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 4px 12px;
+    padding: 4px 12px 4px 8px;
     border-radius: 16px;
     background: #f0f4f9;
     font-size: 13px;
