@@ -1000,9 +1000,13 @@ function _buildTableRow(item, index) {
     if (currentView === "files" && !item.is_dir) {
         const previewKind = canPreview(item, ext);
         if (previewKind) {
-            // 文件预览不动目录,选择保留
+            // 可预览:双击 → 打开预览(不动目录,选择保留)
             _attachDblclickHandler(tr, index, () => previewFile(item, previewKind), false);
             tr.style.cursor = "pointer";
+        } else {
+            // 不可预览的文件:仍要绑定 click,否则单击无法触发选中/多选。
+            // 双击无操作(用户用行尾按钮做下载/重命名/移动/删除)。
+            _attachDblclickHandler(tr, index, () => {}, false);
         }
     }
     if (currentView === "files" && item.is_dir) {
