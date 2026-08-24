@@ -277,6 +277,11 @@ let currentView = "files";
 let currentPath = "";
 let currentRawPath = ""; // 路径输入框在编辑模式下显示的"原始路径"，与 currentPath 同步
 let currentItemsList = [];
+// 渲染用列表:当前搜索词过滤后的结果。无搜索时与 currentItemsList 是同一引用。
+// 表格渲染 / 虚拟滚动 / 行点击 / 操作按钮索引一律使用 displayedItems,
+// 这样搜索与虚拟滚动(>=200 条只渲染可见行)可以正确协作。
+let displayedItems = [];
+let searchQuery = ""; // 当前搜索词(空串 = 不过滤)
 let selectedItems = [];
 let lastSelectedIndex = -1; // shift+click 的锚点；普通点击/Ctrl 加入时更新
 let currentXHRs = {};
@@ -502,10 +507,11 @@ window.addEventListener("popstate", () => {
     navigateFromUrl({ replace: false });
 });
 
-// 全局错误兜底:script 错误不再只丢到 console,屏幕也能看到
+// 全局错误兜底:script 错误除了进 console,也用 toast 让用户可见
 window.addEventListener("error", (e) => {
     if (e && e.error) {
         console.error("[window.error]", e.error);
+        showToast("页面发生内部错误,请打开控制台查看详情");
     }
 });
 window.addEventListener("unhandledrejection", (e) => {
@@ -649,7 +655,7 @@ async function loadPath(path) {
         // 主动取消的请求不报错
         if (e && e.name === 'AbortError') return;
         console.error("[loadPath]", e);
-        alert("加载目录失败:" + (e && e.message ? e.message : e));
+        showAlert("加载目录失败", e && e.message ? e.message : String(e));
     }
 }
 
@@ -673,7 +679,7 @@ function renderPinnedMain() {
 }
 
 function openPinnedItem(idx) {
-    const item = currentItemsList[idx];
+    const item = displayedItems[idx];
     if (!item || !item.is_dir) return;
     switchToFilesView();
     loadPath(item.full_path);
@@ -684,11 +690,27 @@ async function loadTrash() {
     clearSelection();
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/trash`);
+        if (!res.ok) {
+            // 后端错误(限流/500 等)要展示具体原因,而不是静默显示一个空回收站
+            let detail = `HTTP ${res.status}`;
+            try {
+                const body = await res.json();
+                if (body && (body.detail || body.error)) {
+                    detail = body.detail || body.error;
+                }
+            } catch (_) { /* 响应不是 JSON,忽略 */ }
+            currentItemsList = [];
+            renderTableHeader();
+            renderTableBody();
+            return showAlert("加载回收站失败", detail);
+        }
         const data = await res.json();
-        currentItemsList = data.items;
+        currentItemsList = Array.isArray(data.items) ? data.items : [];
         renderTableHeader();
         renderTableBody();
-    } catch (e) { alert("加载回收站失败"); }
+    } catch (e) {
+        showAlert("加载回收站失败", e && e.message ? e.message : String(e));
+    }
 }
 
 // ================= 列排序 =================
@@ -750,15 +772,16 @@ function sortArrowSvg(direction) {
 }
 
 /**
- * 对当前 currentItemsList 原地排序：
+ * 对展示列表(displayedItems)原地排序：
  * - 文件夹始终排在文件前（不受字段/方向影响）；
  * - 同类型内按 sortField（name/modified/size）排序；
  * - sortDirection 控制升/降序；"name" 用中文 localeCompare 以正确处理中文文件名。
+ * 无搜索时 displayedItems 与 currentItemsList 同引用,排序结果即全量排序。
  */
 function sortItems() {
-    if (!currentItemsList || currentItemsList.length === 0) return;
+    if (!displayedItems || displayedItems.length === 0) return;
     const dir = sortDirection === "asc" ? 1 : -1;
-    currentItemsList.sort((a, b) => {
+    displayedItems.sort((a, b) => {
         if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
         let cmp = 0;
         if (sortField === "name") {
@@ -870,7 +893,7 @@ function _vscrollOnScroll() {
     const container = _vscrollGetContainer();
     if (!container) return;
     const rowH = _vscrollRowHeight;
-    const total = currentItemsList.length;
+    const total = displayedItems.length;
     const scrollTop = container.scrollTop;
     const viewport = container.clientHeight || 600;
     const start = Math.max(0, Math.floor(scrollTop / rowH) - VSCROLL_BUFFER);
@@ -898,7 +921,7 @@ function _vscrollRenderRows(start, end, rowH) {
         spacer.appendChild(td);
         tbody.appendChild(spacer);
     }
-    const totalH = currentItemsList.length * rowH;
+    const totalH = displayedItems.length * rowH;
     spacer.firstElementChild.style.height = totalH + "px";
 
     const old = tbody.querySelectorAll("tr:not(.vscroll-spacer)");
@@ -906,7 +929,7 @@ function _vscrollRenderRows(start, end, rowH) {
 
     const frag = document.createDocumentFragment();
     for (let i = start; i < end; i++) {
-        const item = currentItemsList[i];
+        const item = displayedItems[i];
         const tr = _buildTableRow(item, i);
         tr.style.position = "absolute";
         tr.style.left = "0";
@@ -975,6 +998,9 @@ function _attachDblclickHandler(tr, index, action, clearSel = false) {
     //   指向旧目录的 items,新目录里已经无意义,清掉。
     // clearSel=false:预览文件(previewFile)时目录没变,选择保留。
     tr.addEventListener("click", (e) => {
+        // 行内操作按钮(重命名/下载/移动/删除等)由全局事件委托统一处理,
+        // 点击按钮不应触发行选中/双击逻辑。
+        if (e.target.closest && e.target.closest(".action-btn, .action-more")) return;
         const now = Date.now();
         const isDbl = (_lastClickIndex === index) && (now - _lastClickTs) <= DBLCLICK_WINDOW_MS;
         if (isDbl) {
@@ -1024,42 +1050,45 @@ function _buildTableRow(item, index) {
 
     if (currentView === "files") {
         metaCells = `<td class="col-modified">${formatDate(item.modified)}</td><td class="col-size">${formatBytes(item.size)}</td>`;
+        // 操作按钮只携带 data-action/data-index,由全局事件委托统一分发:
+        // 不再用 onclick 字符串内嵌文件名 -- escapeAttr 的 &#39; 经 HTML 属性
+        // 解码后会破坏 JS 字符串,含单引号的文件名曾让整行按钮全部失效。
         actionCell = `
             <td class="col-actions">
                 <div class="row-actions-desktop" style="display:flex;">
-                    <div class="action-btn" data-tooltip="重命名" onclick="event.stopPropagation(); openRenameDialog(${index})">
+                    <div class="action-btn" data-tooltip="重命名" data-action="rename" data-index="${index}">
                         <svg height="20" viewBox="0 -960 960 960" width="20" focusable="false" fill="currentColor"><path d="M351-144l144-144h369v144H351Zm-183-72h51l375-375-51-51-375 375v51Zm-72 72v-153l498-498q11-11 23.84-16 12.83-5 27-5 14.16 0 27.16 5t24 16l51 51q11 11 16 24t5 26.54q0 14.45-5.02 27.54T747-642L249-144H96Zm600-549-51-51 51 51Zm-127.95 76.95L543-642l51 51-25.95-25.05Z"/></svg>
                     </div>
-                    <div class="action-btn" data-tooltip="移动" onclick="event.stopPropagation(); moveSingle('${escapeAttr(item.name)}')">
+                    <div class="action-btn" data-tooltip="移动" data-action="move" data-index="${index}">
                         <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10zm-8.01-9l-1.41 1.41L12.16 12H8v2h4.16l-1.59 1.59L11.99 17 16 13.01 11.99 9z"/></svg>
                     </div>
-                    ${!item.is_dir ? `<div class="action-btn" data-tooltip="下载" onclick="event.stopPropagation(); downloadFile('${escapeAttr(item.name)}')">
+                    ${!item.is_dir ? `<div class="action-btn" data-tooltip="下载" data-action="download" data-index="${index}">
                         <svg height="20" width="20" viewBox="0 96 960 960" fill="#444746"><path d="M240 896q-33 0-56.5-23.5T160 816V696h80v120h480V696h80v120q0 33-23.5 56.5T720 896H240Zm240-160L280 536l56-58 104 104V256h80v326l104-104 56 58-200 200Z"/></svg>
-                    </div>` : `<div class="action-btn" data-tooltip="下载文件夹" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.name)}')">
+                    </div>` : `<div class="action-btn" data-tooltip="下载文件夹" data-action="download" data-index="${index}">
                         <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M13 9h-2v4.2l-1.6-1.6L8 13l4 4 4-4-1.4-1.4-1.6 1.6ZM4 20c-.55 0-1.02-.2-1.41-.59s-.59-.86-.59-1.41V6c0-.55.2-1.02.59-1.41s.86-.59 1.41-.59h6l2 2h8c.55 0 1.02.2 1.41.59s.59.86.59 1.41v10c0 .55-.2 1.02-.59 1.41s-.86.59-1.41.59Zm0-2h16V8h-8.83l-2-2H4Z"/></svg>
                     </div>`}
-                    <div class="action-btn" data-tooltip="移至回收站" onclick="event.stopPropagation(); trashSingle('${escapeAttr(item.name)}')">
+                    <div class="action-btn" data-tooltip="移至回收站" data-action="trash" data-index="${index}">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M15 4V3H9v1H4v2h1v13c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6h1V4h-5zm2 15H7V6h10v13zM9 8h2v9H9zm4 0h2v9h-2z"/></svg>
                     </div>
                 </div>
-                <button class="action-more" type="button" aria-label="更多操作" onclick="event.stopPropagation(); openMobileActions(${index}, 'files')">⋮</button>
+                <button class="action-more" type="button" aria-label="更多操作" data-action="more" data-view="files" data-index="${index}">⋮</button>
             </td>`;
     } else if (currentView === "pinned") {
         metaCells = `<td class="col-fullpath" style="color:var(--text-muted); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" data-tooltip="${escapeAttr(item.full_path || "根目录")}">${escapeHtml(item.full_path || "根目录")}</td>`;
         actionCell = `
             <td class="col-actions">
                 <div class="row-actions-desktop" style="display:flex;">
-                    <div class="action-btn" data-tooltip="进入目录" onclick="event.stopPropagation(); openPinnedItem(${index})">
+                    <div class="action-btn" data-tooltip="进入目录" data-action="open-pinned" data-index="${index}">
                         <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path fill="none" d="M0 0h24v24H0V0z"/><path d="M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5z"/></svg>
                     </div>
-                    <div class="action-btn" data-tooltip="下载" onclick="event.stopPropagation(); downloadFolder('${escapeAttr(item.full_path)}')">
+                    <div class="action-btn" data-tooltip="下载" data-action="download-pinned" data-index="${index}">
                         <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M13 9h-2v4.2l-1.6-1.6L8 13l4 4 4-4-1.4-1.4-1.6 1.6ZM4 20c-.55 0-1.02-.2-1.41-.59s-.59-.86-.59-1.41V6c0-.55.2-1.02.59-1.41s.86-.59 1.41-.59h6l2 2h8c.55 0 1.02.2 1.41.59s.59.86.59 1.41v10c0 .55-.2 1.02-.59 1.41s-.86.59-1.41.59Zm0-2h16V8h-8.83l-2-2H4Z"/></svg>
                     </div>
-                    <div class="action-btn" data-tooltip="取消固定" onclick="event.stopPropagation(); unpinFromMain(${index})">
-                        <svg width="20" width="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+                    <div class="action-btn" data-tooltip="取消固定" data-action="unpin" data-index="${index}">
+                        <svg width="20" height="20" viewBox="0 0 24 24" focusable="false" fill="#444746"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
                     </div>
                 </div>
-                <button class="action-more" type="button" aria-label="更多操作" onclick="event.stopPropagation(); openMobileActions(${index}, 'pinned')">⋮</button>
+                <button class="action-more" type="button" aria-label="更多操作" data-action="more" data-view="pinned" data-index="${index}">⋮</button>
             </td>`;
     } else {
         metaCells = `
@@ -1069,14 +1098,14 @@ function _buildTableRow(item, index) {
         actionCell = `
             <td class="col-actions">
                 <div class="row-actions-desktop" style="display:flex;">
-                    <div class="action-btn" data-tooltip="还原" onclick="event.stopPropagation(); restoreSingle('${escapeAttr(item.trashed_name)}')">
+                    <div class="action-btn" data-tooltip="还原" data-action="restore" data-index="${index}">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="#444746"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
                     </div>
-                    <div class="action-btn" data-tooltip="永久删除" onclick="event.stopPropagation(); deletePermSingle('${escapeAttr(item.trashed_name)}')">
+                    <div class="action-btn" data-tooltip="永久删除" data-action="delete-perm" data-index="${index}">
                         <svg height="20" width="20" viewBox="0 0 24 24" fill="#444746"><path d="M9.4 16.5l2.6-2.6 2.6 2.6 1.4-1.4-2.6-2.6L16 9.9l-1.4-1.4-2.6 2.6-2.6-2.6L8 9.9l2.6 2.6L8 15.1ZM7 21q-.825 0-1.412-.587Q5 19.825 5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413Q17.825 21 17 21ZM17 6H7v13h10ZM7 6v13Z"/></svg>
                     </div>
                 </div>
-                <button class="action-more" type="button" aria-label="更多操作" onclick="event.stopPropagation(); openMobileActions(${index}, 'trash')">⋮</button>
+                <button class="action-more" type="button" aria-label="更多操作" data-action="more" data-view="trash" data-index="${index}">⋮</button>
             </td>`;
     }
 
@@ -1095,6 +1124,11 @@ function renderTableBody() {
     const tbody = document.getElementById("fileTableBody");
     tbody.innerHTML = "";
 
+    // 先按当前搜索词过滤出展示列表,再排序渲染。
+    // 搜索作用于数据源而不是 DOM -- 虚拟滚动(>=200 条只渲染可见行)下,
+    // 遍历 DOM 行做 display:none 既搜不到未渲染的行,滚动重渲染后还会丢结果。
+    rebuildDisplayedItems();
+
     // 始终按当前 sortField/sortDirection 排序后再渲染
     sortItems();
 
@@ -1105,10 +1139,16 @@ function renderTableBody() {
         _vscrollReset();
         return;
     }
+    if (displayedItems.length === 0) {
+        const colCount = currentView === "files" ? 4 : (currentView === "pinned" ? 3 : 5);
+        tbody.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center; padding:32px; color:#aaa;">没有匹配「${escapeHtml(searchQuery)}」的文件</td></tr>`;
+        _vscrollReset();
+        return;
+    }
 
-    if (currentItemsList.length >= VSCROLL_THRESHOLD) {
+    if (displayedItems.length >= VSCROLL_THRESHOLD) {
         // 启用虚拟滚动:先临时放一行用于测行高,再清空正式渲染
-        const probe = _buildTableRow(currentItemsList[0], 0);
+        const probe = _buildTableRow(displayedItems[0], 0);
         tbody.appendChild(probe);
         _vscrollRowHeight = Math.max(1, _vscrollMeasureRowHeight());
         _vscrollAttach();
@@ -1117,7 +1157,7 @@ function renderTableBody() {
         const viewport = (container && container.clientHeight) || 600;
         const start = 0;
         const end = Math.min(
-            currentItemsList.length,
+            displayedItems.length,
             Math.ceil(viewport / _vscrollRowHeight) + VSCROLL_BUFFER * 2,
         );
         _vscrollLastRange = { start, end };
@@ -1126,7 +1166,7 @@ function renderTableBody() {
         // 普通全量渲染
         _vscrollReset();
         const frag = document.createDocumentFragment();
-        currentItemsList.forEach((item, index) => {
+        displayedItems.forEach((item, index) => {
             frag.appendChild(_buildTableRow(item, index));
         });
         tbody.appendChild(frag);
@@ -1160,7 +1200,7 @@ function escapeHtml(s) {
  *   Ctrl + Shift + 点击 -> 在已有选择基础上扩展范围
  */
 function handleRowClick(e, idx) {
-    const item = currentItemsList[idx];
+    const item = displayedItems[idx];
     if (!item) return;
 
     // ============= 移动端：彻底走单击打开,禁用多选 =============
@@ -1189,7 +1229,7 @@ function handleRowClick(e, idx) {
             selectedItems = [];
         }
         for (let i = start; i <= end; i++) {
-            const it = currentItemsList[i];
+            const it = displayedItems[i];
             if (it && !selectedItems.includes(it)) {
                 selectedItems.push(it);
             }
@@ -1220,7 +1260,7 @@ function updateRowSelectionUI() {
     rows.forEach(tr => {
         const idx = parseInt(tr.getAttribute("data-index"), 10);
         if (Number.isNaN(idx)) return;
-        const item = currentItemsList[idx];
+        const item = displayedItems[idx];
         if (item && selectedItems.includes(item)) {
             tr.classList.add("selected");
         } else {
@@ -1262,7 +1302,9 @@ function updateSelectionState() {
             document.getElementById("selRestore").style.display = "none";
             document.getElementById("selDeletePerm").style.display = "none";
         } else {
-            document.getElementById("selDownload").style.display = "block";
+            // 回收站视图:文件本体在 .trash 下且凭 trashed_name 才能定位,
+            // 常规下载接口(按原始路径)拿不到它,隐藏下载按钮避免必然失败的请求。
+            document.getElementById("selDownload").style.display = "none";
             document.getElementById("selMove").style.display = "none";
             document.getElementById("selTrash").style.display = "none";
             document.getElementById("selLink").style.display = "none";
@@ -1302,7 +1344,7 @@ function closeSidebar() {
  */
 function openMobileActions(index, viewType) {
     if (!window.IS_MOBILE) return;
-    const item = currentItemsList[index];
+    const item = displayedItems[index];
     if (!item) return;
     closeMobileActions();
 
@@ -1345,7 +1387,7 @@ function openMobileActions(index, viewType) {
             const ext = (item.name.split(".").pop() || "").toLowerCase();
             const previewKind = canPreview(item, ext);
             if (previewKind) previewFile(item, previewKind);
-            else alert("该文件类型暂不支持预览");
+            else showToast("该文件类型暂不支持预览");
         }});
         actions.push({ label: "下载", icon: downloadIcon(), run: () => {
             if (item.is_dir) downloadFolder(item.name);
@@ -1362,7 +1404,7 @@ function openMobileActions(index, viewType) {
         actions.push({ label: "移至回收站", icon: trashIcon(), danger: true, run: () => trashSingle(item.name) });
     } else if (viewType === "pinned") {
         actions.push({ label: "进入目录", icon: enterIcon(), run: () => openPinnedItem(index) });
-        actions.push({ label: "下载", icon: downloadIcon(), run: () => downloadFolder(item.full_path) });
+        actions.push({ label: "下载", icon: downloadIcon(), run: () => downloadFolderByPath(item.full_path) });
         actions.push({ label: "取消固定", icon: unpinIcon(), run: () => unpinFromMain(index) });
     } else { // trash
         actions.push({ label: "还原", icon: restoreIcon(), run: () => restoreSingle(item.trashed_name) });
@@ -1559,12 +1601,12 @@ document.addEventListener("keydown", (e) => {
     }
 
     if (currentView !== "files") return;
-    if (!currentItemsList || currentItemsList.length === 0) return;
+    if (!displayedItems || displayedItems.length === 0) return;
 
     e.preventDefault();
-    // 把当前列表全部置入 selectedItems；保持顺序以便后续范围选择行为一致
-    selectedItems = currentItemsList.slice();
-    lastSelectedIndex = currentItemsList.length - 1;
+    // 选中当前可见(搜索过滤后)的全部条目;保持顺序以便后续范围选择行为一致
+    selectedItems = displayedItems.slice();
+    lastSelectedIndex = displayedItems.length - 1;
     updateRowSelectionUI();
     updateSelectionState();
 });
@@ -1589,6 +1631,65 @@ document.addEventListener("click", (e) => {
     clearSelection();
 });
 
+// ================= 表格行操作按钮:事件委托 =================
+// 行内按钮只携带 data-action / data-index,统一在这里查 displayedItems[index]
+// 取名字后调用对应函数。彻底消除"onclick 字符串里内嵌文件名"的注入面:
+// escapeAttr 的 &#39; 经 HTML 属性解码后会破坏 JS 字符串,含单引号的文件名
+// 曾让该行的下载/移动/删除等按钮全部失效(SyntaxError)。
+// 行的 click 监听器(_attachDblclickHandler)已排除 .action-btn/.action-more,
+// 不会与按钮点击互相干扰。
+document.addEventListener("click", (e) => {
+    const btn = e.target.closest ? e.target.closest("[data-action]") : null;
+    if (!btn) return;
+    const action = btn.getAttribute("data-action");
+    const index = parseInt(btn.getAttribute("data-index"), 10);
+    if (Number.isNaN(index)) return;
+    const item = displayedItems[index];
+    if (!item) return;
+    switch (action) {
+        case "rename": openRenameDialog(index); break;
+        case "move": moveSingle(item.name); break;
+        case "download":
+            if (item.is_dir) downloadFolder(item.name);
+            else downloadFile(item.name);
+            break;
+        case "trash": trashSingle(item.name); break;
+        case "open-pinned": openPinnedItem(index); break;
+        case "download-pinned": downloadFolderByPath(item.full_path); break;
+        case "unpin": unpinFromMain(index); break;
+        case "restore": restoreSingle(item.trashed_name); break;
+        case "delete-perm": deletePermSingle(item.trashed_name); break;
+        case "more": openMobileActions(index, btn.getAttribute("data-view") || "files"); break;
+    }
+});
+
+// 面包屑路径段:容器级事件委托,读取 data-path(不再内嵌 onclick 字符串)。
+// stopPropagation 阻止冒泡到 pathBox 触发"进入路径编辑模式"。
+(function setupBreadcrumbNav() {
+    const bc = document.getElementById("breadcrumb");
+    if (!bc) return;
+    bc.addEventListener("click", (e) => {
+        const seg = e.target.closest ? e.target.closest("span[data-path]") : null;
+        if (!seg) return;
+        e.stopPropagation();
+        const path = seg.getAttribute("data-path");
+        if (path) loadPath(path);
+    });
+})();
+
+// 侧边栏固定项:容器级事件委托(innerHTML 会被 renderPinnedSidebar 重写,
+// 绑在容器上比每项绑一次更稳)。注意不要 stopPropagation -- 移动端
+// ".sidebar 上的委托"依赖事件继续冒泡来实现"点击导航项后收起抽屉"。
+(function setupPinnedNav() {
+    const box = document.getElementById("pinnedList");
+    if (!box) return;
+    box.addEventListener("click", (e) => {
+        const item = e.target.closest ? e.target.closest(".pinned-item[data-path]") : null;
+        if (!item) return;
+        goToPinned(item.getAttribute("data-path"));
+    });
+})();
+
 async function trashSingle(filename) {
     const path = joinPath(currentPath, filename);
     try {
@@ -1599,13 +1700,13 @@ async function trashSingle(filename) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            return alert("删除失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("删除失败", data.detail || `HTTP ${res.status}`);
         }
         if (data.errors && data.errors.length) {
-            alert("部分项目未删除：\n" + data.errors.join("\n"));
+            showAlert("部分项目未删除", data.errors.join("\n"));
         }
     } catch (e) {
-        return alert("删除失败：" + e.message);
+        return showAlert("删除失败", errMessage(e));
     }
     loadPath(currentPath);
     updateStorage();
@@ -1622,15 +1723,15 @@ async function bulkTrash() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            return alert("批量删除失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("批量删除失败", data.detail || `HTTP ${res.status}`);
         }
         if (data.errors && data.errors.length) {
-            alert(`已删除 ${data.count} 项。\n以下项未删除：\n` + data.errors.join("\n"));
+            showAlert(`已删除 ${data.count} 项`, "以下项未删除：\n" + data.errors.join("\n"));
         }
         clearSelection();
         loadPath(currentPath);
         updateStorage();
-    } catch (e) { alert("批量删除失败：" + e.message); }
+    } catch (e) { showAlert("批量删除失败", errMessage(e)); }
 }
 
 async function restoreSingle(trashedName) {
@@ -1642,13 +1743,13 @@ async function restoreSingle(trashedName) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            return alert("还原失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("还原失败", data.detail || `HTTP ${res.status}`);
         }
         if (data.errors && data.errors.length) {
-            alert("部分项目未还原：\n" + data.errors.join("\n"));
+            showAlert("部分项目未还原", data.errors.join("\n"));
         }
     } catch (e) {
-        return alert("还原失败：" + e.message);
+        return showAlert("还原失败", errMessage(e));
     }
     loadTrash();
     updateStorage();
@@ -1665,19 +1766,19 @@ async function bulkRestore() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            return alert("批量恢复失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("批量恢复失败", data.detail || `HTTP ${res.status}`);
         }
         if (data.errors && data.errors.length) {
-            alert(`已恢复 ${data.count} 项。\n以下项未恢复：\n` + data.errors.join("\n"));
+            showAlert(`已恢复 ${data.count} 项`, "以下项未恢复：\n" + data.errors.join("\n"));
         }
         clearSelection();
         loadTrash();
         updateStorage();
-    } catch (e) { alert("批量恢复失败：" + e.message); }
+    } catch (e) { showAlert("批量恢复失败", errMessage(e)); }
 }
 
 async function deletePermSingle(trashedName) {
-    if (!confirm("确定要永久删除该项内容吗？此操作不可逆。")) return;
+    if (!(await showConfirm("永久删除", "确定要永久删除该项内容吗？此操作不可逆。", { confirmText: "删除" }))) return;
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/action/bulk_delete_permanently`, {
             method: "POST",
@@ -1686,13 +1787,13 @@ async function deletePermSingle(trashedName) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            return alert("永久删除失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("永久删除失败", data.detail || `HTTP ${res.status}`);
         }
         if (data.errors && data.errors.length) {
-            alert("部分项目未删除：\n" + data.errors.join("\n"));
+            showAlert("部分项目未删除", data.errors.join("\n"));
         }
     } catch (e) {
-        return alert("永久删除失败：" + e.message);
+        return showAlert("永久删除失败", errMessage(e));
     }
     loadTrash();
     updateStorage();
@@ -1700,7 +1801,7 @@ async function deletePermSingle(trashedName) {
 
 async function bulkDeletePermanently() {
     if (selectedItems.length === 0) return;
-    if (!confirm(`确定要永久删除选中的 ${selectedItems.length} 项内容吗？此操作不可恢复。`)) return;
+    if (!(await showConfirm("永久删除", `确定要永久删除选中的 ${selectedItems.length} 项内容吗？此操作不可恢复。`, { confirmText: "删除" }))) return;
     const names = selectedItems.map(item => item.trashed_name);
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/action/bulk_delete_permanently`, {
@@ -1710,22 +1811,25 @@ async function bulkDeletePermanently() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            return alert("批量永久删除失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("批量永久删除失败", data.detail || `HTTP ${res.status}`);
         }
         if (data.errors && data.errors.length) {
-            alert(`已删除 ${data.count} 项。\n以下项未删除：\n` + data.errors.join("\n"));
+            showAlert(`已删除 ${data.count} 项`, "以下项未删除：\n" + data.errors.join("\n"));
         }
         clearSelection();
         loadTrash();
         updateStorage();
-    } catch (e) { alert("批量永久删除失败：" + e.message); }
+    } catch (e) { showAlert("批量永久删除失败", errMessage(e)); }
 }
 
 async function bulkDownload() {
     if (selectedItems.length === 0) return;
+    // 回收站条目无法按原始路径下载(见 updateSelectionState 的说明)
+    if (currentView === "trash") return;
     for (const item of selectedItems) {
         if (item.is_dir) {
-            await downloadFolder(item.name);
+            // pinned 视图条目携带完整路径(full_path);files 视图按当前目录拼接
+            await downloadFolderByPath(item.full_path || joinPath(currentPath, item.name));
         } else {
             await downloadFile(item.name);
         }
@@ -1759,7 +1863,17 @@ async function downloadFile(filename) {
 }
 
 async function downloadFolder(foldername) {
-    const p = joinPath(currentPath, foldername);
+    // 当前目录下的子文件夹(仅传相对名):与 currentPath 拼接后走完整路径下载
+    return downloadFolderByPath(joinPath(currentPath, foldername));
+}
+
+/**
+ * 按完整相对路径下载文件夹(zip)。pinned 视图等场景直接持有完整路径,
+ * 不能再与(可能陈旧的)currentPath 拼接 -- 那会拼出错误路径导致 404。
+ */
+async function downloadFolderByPath(folderPath) {
+    const p = folderPath;
+    const displayName = String(p || "").split("/").pop() || "folder";
     let res;
     try {
         res = await fetch(`${CONFIG.API_BASE}/api/download/folder/ticket`, {
@@ -1768,7 +1882,7 @@ async function downloadFolder(foldername) {
             body: JSON.stringify({path: p})
         });
     } catch (e) {
-        return showAlert("下载失败", "网络错误：" + e.message);
+        return showAlert("下载失败", "网络错误：" + errMessage(e));
     }
 
     if (!res.ok) {
@@ -1781,7 +1895,7 @@ async function downloadFolder(foldername) {
     const data = await res.json();
     const a = document.createElement("a");
     a.href = `${CONFIG.API_BASE}/api/download/file?ticket=${data.ticket}`;
-    a.download = data.filename || `${foldername}.zip`;
+    a.download = data.filename || `${displayName}.zip`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -1790,18 +1904,31 @@ async function downloadFolder(foldername) {
 /**
  * 通用提示弹窗（无取消逻辑、仅确定按钮）。
  * 复用 openModal，保持样式与已有弹窗一致。
+ * body 使用 white-space:pre-line,多行错误列表(\n 分隔)也能正常显示。
  */
 function showAlert(title, message) {
     openModal({
         title,
-        bodyHTML: `<div style="padding: 12px 0; color: var(--text-primary); line-height: 1.6;">${escapeHtml(message)}</div>`,
+        bodyHTML: `<div style="padding: 12px 0; color: var(--text-primary); line-height: 1.6; white-space: pre-line;">${escapeHtml(message)}</div>`,
         confirmText: "确定",
         onConfirm: () => true,
     });
 }
 
+/** 把任意 catch 到的错误转成可读文案(reject 的可能是 Error/字符串/响应对象)。 */
+function errMessage(err) {
+    if (err == null) return "未知错误";
+    if (typeof err === "string") return err;
+    if (err.message) return err.message;
+    return String(err);
+}
+
 // ================= 通用弹窗基础设施 =================
 let _modalKeydownHandler = null;
+// 当前 modal 的取消回调(用户点取消/X/遮罩/Esc 时触发,且未点过确认);
+// 配合 showConfirm/showPrompt 把"取消"也变成可 await 的结果。
+let _modalOnCancel = null;
+let _modalConfirmed = false;
 
 function closeModal() {
     const overlay = document.getElementById("modalOverlay");
@@ -1810,6 +1937,10 @@ function closeModal() {
         document.removeEventListener("keydown", _modalKeydownHandler, true);
         _modalKeydownHandler = null;
     }
+    const cancel = _modalOnCancel;
+    _modalOnCancel = null;
+    if (cancel && !_modalConfirmed) cancel();
+    _modalConfirmed = false;
 }
 
 // ================= 预览（全页遮罩 + 中央白色画布） =================
@@ -2014,8 +2145,8 @@ function _loadPreviewImage({ title, src, contentEl, paperEl, loaderEl, stage }) 
 function _buildPreviewImageList(currentItemName) {
     const list = [];
     let idx = -1;
-    if (Array.isArray(currentItemsList)) {
-        currentItemsList.forEach((it) => {
+    if (Array.isArray(displayedItems)) {
+        displayedItems.forEach((it) => {
             if (!it || it.is_dir) return;
             const ext = (String(it.name).split(".").pop() || "").toLowerCase();
             if (canPreview(it, ext) === "image") {
@@ -2138,15 +2269,17 @@ function _setupImageSwipe(stage) {
 }
 
 /**
- * 按需加载 artplayer.js（cdn.jsdelivr.net）。仅首次视频/音频预览时拉取，
- * 后续预览复用同一份 promise。失败时抛出，调用方负责给出错误提示。
+ * 按需加载 artplayer.js。已本地托管到 vendor/(锁定 5.4.0,与后端同源),
+ * 仅首次视频/音频预览时拉取,后续预览复用同一份 promise。
+ * 失败时抛出，调用方负责给出错误提示。
  */
 function _loadArtplayer() {
     if (typeof window.Artplayer !== "undefined") return Promise.resolve(window.Artplayer);
     if (_artplayerLoaderPromise) return _artplayerLoaderPromise;
     _artplayerLoaderPromise = new Promise((resolve, reject) => {
         const s = document.createElement("script");
-        s.src = "https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.js";
+        // 相对路径:与 index.html 同源的 vendor 目录,自动适配 BASE_PATH 部署
+        s.src = "vendor/artplayer.js";
         s.async = true;
         s.onload = () => {
             if (typeof window.Artplayer !== "undefined") resolve(window.Artplayer);
@@ -2442,19 +2575,23 @@ function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
                 return;
             }
             const raw = contentEl.dataset.raw || "";
-            // 必须用 DOMPurify 消毒 marked 的输出,否则 `<img onerror=...>` 等可触发 XSS
-            const html = typeof DOMPurify !== "undefined"
-                ? DOMPurify.sanitize(marked.parse(raw), {
-                    ALLOWED_TAGS: [
-                        "a","b","i","em","strong","code","pre","blockquote",
-                        "ul","ol","li","p","br","hr","h1","h2","h3","h4","h5","h6",
-                        "img","table","thead","tbody","tr","th","td","del","sup","sub",
-                        "span","div",
-                    ],
-                    ALLOWED_ATTR: ["href","title","alt","src","colspan","rowspan"],
-                    ALLOW_DATA_ATTR: false,
-                })
-                : marked.parse(raw);  // DOMPurify 未加载时回退(理论上 CDN 失败)
+            // 必须用 DOMPurify 消毒 marked 的输出,否则 `<img onerror=...>` 等可触发 XSS。
+            // DOMPurify 未加载时(理论上不应发生 -- 已本地托管)绝不输出未消毒 HTML,
+            // 一律回退纯文本渲染。
+            if (typeof DOMPurify === "undefined") {
+                renderRaw();
+                return;
+            }
+            const html = DOMPurify.sanitize(marked.parse(raw), {
+                ALLOWED_TAGS: [
+                    "a","b","i","em","strong","code","pre","blockquote",
+                    "ul","ol","li","p","br","hr","h1","h2","h3","h4","h5","h6",
+                    "img","table","thead","tbody","tr","th","td","del","sup","sub",
+                    "span","div",
+                ],
+                ALLOWED_ATTR: ["href","title","alt","src","colspan","rowspan"],
+                ALLOW_DATA_ATTR: false,
+            });
             contentEl.innerHTML = "";
             const wrap = document.createElement("div");
             wrap.className = "preview-md";
@@ -2574,11 +2711,15 @@ async function previewFile(item, kind) {
 
 /**
  * 构建并显示一个居中弹窗。
- * @param {object} opts { title, bodyHTML, onConfirm, confirmText, onOpen }
+ * @param {object} opts { title, bodyHTML, onConfirm, confirmText, onOpen, onCancel }
  *   onConfirm 返回 false 可阻止关闭（用于校验失败）。
+ *   onCancel 在用户以"未确认"方式关闭(取消按钮/X/遮罩/Esc)时触发;
+ *   打开新 modal 时若旧 modal 仍未确认,其 onCancel 也会被触发。
  */
-function openModal({ title, bodyHTML, onConfirm, confirmText = "确定", onOpen }) {
+function openModal({ title, bodyHTML, onConfirm, confirmText = "确定", onOpen, onCancel }) {
     closeModal();
+    _modalOnCancel = onCancel || null;
+    _modalConfirmed = false;
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
     overlay.id = "modalOverlay";
@@ -2604,7 +2745,10 @@ function openModal({ title, bodyHTML, onConfirm, confirmText = "确定", onOpen 
     cancelBtn.onclick = closeModal;
     confirmBtn.onclick = async () => {
         const ok = onConfirm ? await onConfirm() : true;
-        if (ok !== false) closeModal();
+        if (ok !== false) {
+            _modalConfirmed = true;
+            closeModal();
+        }
     };
 
     _modalKeydownHandler = (e) => {
@@ -2614,6 +2758,59 @@ function openModal({ title, bodyHTML, onConfirm, confirmText = "确定", onOpen 
 
     if (onOpen) onOpen(overlay);
     return overlay;
+}
+
+/**
+ * 确认弹窗(替代原生 confirm):返回 Promise<boolean>。
+ * 用户点"确认" -> resolve(true);取消/X/遮罩/Esc -> resolve(false)。
+ */
+function showConfirm(title, message, { confirmText = "确定" } = {}) {
+    return new Promise((resolve) => {
+        openModal({
+            title,
+            bodyHTML: `<div style="padding: 12px 0; color: var(--text-primary); line-height: 1.6; white-space: pre-line;">${escapeHtml(message)}</div>`,
+            confirmText,
+            onConfirm: () => { resolve(true); return true; },
+            onCancel: () => resolve(false),
+        });
+    });
+}
+
+/**
+ * 输入弹窗(替代原生 prompt):返回 Promise<string|null>。
+ * 用户点"确认" -> resolve(输入值,已 trim);取消 -> resolve(null)。
+ * validate(value) 返回错误文案时阻止关闭并 toast 提示,输入框保留。
+ */
+function showPrompt(title, { value = "", placeholder = "", confirmText = "确定", validate } = {}) {
+    return new Promise((resolve) => {
+        let settled = false;
+        openModal({
+            title,
+            confirmText,
+            bodyHTML: `<input type="text" class="modal-input" id="promptInput" placeholder="${escapeAttr(placeholder)}" value="${escapeAttr(value)}">`,
+            onOpen: (overlay) => {
+                const input = overlay.querySelector("#promptInput");
+                input.focus();
+                input.select();
+                input.addEventListener("keydown", (e) => {
+                    if (e.key === "Enter") { e.preventDefault(); overlay.querySelector("#modalConfirmBtn").click(); }
+                });
+            },
+            onCancel: () => { if (!settled) resolve(null); },
+            onConfirm: () => {
+                const input = document.getElementById("promptInput");
+                const val = (input && input.value ? input.value : "").trim();
+                const err = validate ? validate(val) : null;
+                if (err) {
+                    showToast(err);
+                    return false;  // 阻止关闭,用户可修正后重试
+                }
+                settled = true;
+                resolve(val);
+                return true;
+            },
+        });
+    });
 }
 
 // ================= 重命名（弹窗） =================
@@ -2629,7 +2826,7 @@ function _validateName(name) {
 
 function openRenameDialog(idx) {
     if (currentView !== "files") return;
-    const item = currentItemsList[idx];
+    const item = displayedItems[idx];
     if (!item) return;
     const oldName = item.name;
 
@@ -2653,7 +2850,7 @@ function openRenameDialog(idx) {
             const newName = input.value.trim();
             if (newName === oldName) return true; // 未修改，直接关闭
             const err = _validateName(newName);
-            if (err) { alert(err); return false; }
+            if (err) { showToast(err); return false; }
 
             const oldPath = joinPath(currentPath, oldName);
             const newPath = joinPath(currentPath, newName);
@@ -2664,11 +2861,11 @@ function openRenameDialog(idx) {
                     body: JSON.stringify({path: oldPath, target_path: newPath})
                 });
                 const data = await res.json().catch(() => ({}));
-                if (!res.ok) { alert("重命名失败：" + (data.detail || `HTTP ${res.status}`)); return false; }
+                if (!res.ok) { showToast(`重命名失败：${data.detail || `HTTP ${res.status}`}`); return false; }
                 loadPath(currentPath);
                 return true;
             } catch (e) {
-                alert("重命名失败：" + e.message);
+                showToast(`重命名失败：${errMessage(e)}`);
                 return false;
             }
         }
@@ -2721,7 +2918,8 @@ function renderPinnedSidebar() {
     if (!pinnedSectionOpen) { box.innerHTML = ""; return; }
     box.innerHTML = pinnedPaths.map(p => {
         const isCurrent = currentView === "files" && p === currentPath;
-        return `<div class="pinned-item ${isCurrent ? "current" : ""}" title="${escapeAttr(p || "根目录")}" onclick="goToPinned('${escapeAttr(p)}')">
+        // data-path 由 #pinnedList 上的事件委托统一处理(不内嵌 onclick 字符串)
+        return `<div class="pinned-item ${isCurrent ? "current" : ""}" title="${escapeAttr(p || "根目录")}" data-path="${escapeAttr(p)}">
             <svg viewBox="0 0 24 24" height="24" width="24" fill="rgb(68, 71, 70)"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
             <span class="pinned-item-name">${escapeHtml(pathLabel(p))}</span>
         </div>`;
@@ -2742,7 +2940,7 @@ function goToPinned(path) {
  * 取消固定后顺手刷新侧边栏 + 主面板列表。
  */
 async function unpinFromMain(idx) {
-    const item = currentItemsList[idx];
+    const item = displayedItems[idx];
     if (!item) return;
     const targetPath = item.full_path || "";
     try {
@@ -2753,14 +2951,14 @@ async function unpinFromMain(idx) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            return alert("操作失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("操作失败", data.detail || `HTTP ${res.status}`);
         }
         pinnedPaths = Array.isArray(data.pinned_list) ? data.pinned_list : pinnedPaths;
         renderPinnedSidebar();
         // 主面板可能正在显示已固定列表，重渲染
         if (currentView === "pinned") renderPinnedMain();
     } catch (e) {
-        alert("操作失败：" + e.message);
+        showAlert("操作失败", errMessage(e));
     }
 }
 
@@ -2799,12 +2997,12 @@ async function togglePinCurrentPath() {
             body: JSON.stringify({path: currentPath})
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) return alert("操作失败：" + (data.detail || `HTTP ${res.status}`));
+        if (!res.ok) return showAlert("操作失败", data.detail || `HTTP ${res.status}`);
         pinnedPaths = Array.isArray(data.pinned_list) ? data.pinned_list : pinnedPaths;
         renderPinnedSidebar();
         updatePinButton();
     } catch (e) {
-        alert("操作失败：" + e.message);
+        showAlert("操作失败", errMessage(e));
     }
 }
 
@@ -2849,7 +3047,7 @@ function openMoveDialog(paths, label) {
         confirmText: "移动到此处",
         bodyHTML,
         onConfirm: async () => {
-            if (sourceParents.has(browsePath)) { alert("目标与原位置相同，请选择其他目录"); return false; }
+            if (sourceParents.has(browsePath)) { showToast("目标与原位置相同，请选择其他目录"); return false; }
             try {
                 const res = await fetch(`${CONFIG.API_BASE}/api/action/move`, {
                     method: "POST",
@@ -2857,16 +3055,16 @@ function openMoveDialog(paths, label) {
                     body: JSON.stringify({paths, target_dir: browsePath})
                 });
                 const data = await res.json().catch(() => ({}));
-                if (!res.ok) { alert("移动失败：" + (data.detail || `HTTP ${res.status}`)); return false; }
+                if (!res.ok) { showToast(`移动失败：${data.detail || `HTTP ${res.status}`}`); return false; }
                 if (data.errors && data.errors.length) {
-                    alert(`已移动 ${data.moved} 项。\n以下项未移动：\n` + data.errors.join("\n"));
+                    showAlert(`已移动 ${data.moved} 项`, "以下项未移动：\n" + data.errors.join("\n"));
                 }
                 clearSelection();
                 loadPath(currentPath);
                 updateStorage();
                 return true;
             } catch (e) {
-                alert("移动失败：" + e.message);
+                showToast(`移动失败：${errMessage(e)}`);
                 return false;
             }
         }
@@ -2948,10 +3146,10 @@ function openMoveDialog(paths, label) {
 async function copyLink() {
     const files = selectedItems.filter(item => !item.is_dir);
     if (files.length === 0) {
-        return alert("请先选择一个文件再复制链接");
+        return showToast("请先选择一个文件再复制链接");
     }
     if (files.length > 1) {
-        return alert("一次只能为一个文件生成分享链接，请仅选中一个文件");
+        return showToast("一次只能为一个文件生成分享链接，请仅选中一个文件");
     }
 
     const file = files[0];
@@ -2966,10 +3164,10 @@ async function copyLink() {
         });
         data = await res.json();
         if (!res.ok) {
-            return alert("生成链接失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("生成链接失败", data.detail || `HTTP ${res.status}`);
         }
     } catch (e) {
-        return alert("生成链接失败：" + e.message);
+        return showAlert("生成链接失败", errMessage(e));
     }
 
     try {
@@ -3024,9 +3222,10 @@ async function toggleUploadWidgetCollapse() {
         : '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z"/></svg>';
 }
 
-function closeUploadWidget() {
+async function closeUploadWidget() {
     if (Object.keys(currentXHRs).length > 0) {
-        if (!confirm("当前有项目正在上传，关闭窗口将中止传输。确定关闭吗？")) return;
+        const ok = await showConfirm("关闭上传窗口", "当前有项目正在上传，关闭窗口将中止传输。确定关闭吗？", { confirmText: "关闭" });
+        if (!ok) return;
         cancelAllUploads();
     }
     document.getElementById("uploadWidget").style.display = "none";
@@ -3034,6 +3233,8 @@ function closeUploadWidget() {
 }
 
 function cancelAllUploads() {
+    // 标记取消:MD5 分片循环与批次循环都会检查该标志并尽快退出
+    _uploadsCancelled = true;
     Object.values(currentXHRs).forEach(xhr => xhr.abort());
     currentXHRs = {};
     document.getElementById("uwList").innerHTML = "";
@@ -3116,17 +3317,14 @@ async function handleNewFolder() {
         switchToFilesView();
         await loadPath("");  // 在根目录创建
     }
-    const raw = prompt("请输入新文件夹的名称");
-    if (raw === null) return;
-    const name = raw.trim();
-    if (!name) return alert("文件夹名称不能为空");
-    if (/[\/\\:*?"<>|\x00-\x1f]/.test(name)) {
-        return alert('名称包含非法字符（\\/:*?"<>| 或控制字符）');
-    }
-    if (name === "." || name === "..") return alert("名称无效");
-    if (name.endsWith(" ") || name.endsWith(".")) {
-        return alert("名称不能以空格或点结尾");
-    }
+    const name = await showPrompt("新建文件夹", {
+        placeholder: "请输入文件夹名称",
+        validate: (v) => {
+            if (!v) return "名称不能为空";
+            return _validateName(v);
+        },
+    });
+    if (name === null) return;  // 用户取消(空名/非法名由 validate 拦截并 toast)
 
     const path = joinPath(currentPath, name);
     try {
@@ -3137,12 +3335,12 @@ async function handleNewFolder() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            return alert("创建失败：" + (data.detail || `HTTP ${res.status}`));
+            return showAlert("创建失败", data.detail || `HTTP ${res.status}`);
         }
         await loadPath(currentPath);
         updateStorage();
     } catch (err) {
-        alert("创建失败：" + err.message);
+        showAlert("创建失败", errMessage(err));
     }
 }
 
@@ -3174,25 +3372,74 @@ async function handleFolderSelect(e) {
     widget.style.display = "block";
     widget.classList.remove("collapsed");
 
+    _uploadsCancelled = false;
+    // 客户端体积预检:超限文件直接标记失败,不在浏览器里白算 MD5
+    const cfg = await getServerConfig();
+    const sizeLimit = cfg.max_upload_size || 0;
+    // 文件夹模式的同名冲突决策:后端对未确认覆盖的同名文件返回 409,
+    // 首次遇到时询问一次,决定作用于本批剩余文件(覆盖全部 / 跳过全部)。
+    let overwriteAll = null;  // null=未决定, true=覆盖全部, false=跳过全部
+
     for (let i = 0; i < files.length; i++) {
+        if (_uploadsCancelled) break;  // 用户点了"取消",剩余文件不再处理
         const file = files[i];
         // webkitRelativePath 形如 "myfolder/sub/a.txt"，保留完整目录结构
         const relPath = file.webkitRelativePath || file.name;
         const fileId = `up_${Date.now()}_${i}_${Math.floor(Math.random() * 1e6)}`;
+        _pendingUploadTasks++;
 
         addUploadTaskUI(fileId, relPath);
         // 关键：这里在 XHR 还没进 currentXHRs 之前就显式声明"正在上传"，
         // 避免 updateUploadTitle 看 currentXHRs.length === 0 而误显示"上传已完成"。
         updateUploadTitle("uploading");
 
+        let md5 = "";
         try {
+            if (sizeLimit && file.size > sizeLimit) {
+                throw { message: `超过大小限制(${formatBytes(sizeLimit)})` };
+            }
             setUploadStatus(fileId, "正在计算 MD5...", 0);
-            const md5 = await calculateMD5(file);
-            await doUploadXHR(fileId, file, md5, relPath);
+            md5 = await calculateMD5(file);
+            await doUploadXHR(fileId, file, md5, relPath, "", overwriteAll === true);
         } catch (err) {
-            setUploadStatus(fileId, "失败: " + err, 0, true);
+            if (err && err.status === 409) {
+                // 服务器上已有同名文件:首次询问,之后按既定决策批量处理
+                if (overwriteAll === null) {
+                    overwriteAll = await askFolderOverwrite();
+                }
+                if (overwriteAll) {
+                    // 覆盖:带显式 overwrite 重试一次
+                    try {
+                        await doUploadXHR(fileId, file, md5, relPath, "", true);
+                    } catch (err2) {
+                        setUploadStatus(fileId, "失败: " + errMessage(err2), 0, true);
+                    }
+                } else {
+                    setUploadStatus(fileId, "已跳过(已有同名文件)", 0, true);
+                }
+            } else {
+                setUploadStatus(fileId, "失败: " + errMessage(err), 0, true);
+            }
+        } finally {
+            finishUploadTask();
         }
     }
+}
+
+/**
+ * 文件夹上传遇到服务器同名文件(409)时询问一次,决定作用于整批:
+ * resolve(true) = 覆盖全部;resolve(false) = 跳过全部。
+ */
+function askFolderOverwrite() {
+    return new Promise((resolve) => {
+        openModal({
+            title: "存在同名文件",
+            bodyHTML: `<div style="padding: 12px 0; color: var(--text-primary); line-height: 1.6;">服务器上已存在同名文件。<br>本批上传如何处理?</div>`,
+            confirmText: "覆盖全部",
+            onConfirm: () => { resolve(true); return true; },
+            onCancel: () => resolve(false),  // 取消按钮 = 跳过全部
+        });
+    });
 }
 
 async function handleFilesUpload(files) {
@@ -3201,10 +3448,16 @@ async function handleFilesUpload(files) {
     widget.style.display = "block";
     widget.classList.remove("collapsed");
 
+    _uploadsCancelled = false;
+    // 客户端体积预检:超限文件直接标记失败,不在浏览器里白算 MD5
+    const cfg = await getServerConfig();
+    const sizeLimit = cfg.max_upload_size || 0;
+
     // 上传前先静默刷新一次目录列表，确保冲突检测用的是最新状态（其它 tab / 后台动作可能改动）
     await refreshItemsListForConflict();
 
     for (let i = 0; i < files.length; i++) {
+        if (_uploadsCancelled) break;  // 用户点了"取消",剩余文件不再处理
         let file = files[i];
         let fileId = `up_${Date.now()}_${i}`;
 
@@ -3228,12 +3481,18 @@ async function handleFilesUpload(files) {
         // 显式声明"正在上传"，XHR 还没创建、currentXHRs 为空也能正确显示
         updateUploadTitle("uploading");
 
+        _pendingUploadTasks++;
         try {
+            if (sizeLimit && file.size > sizeLimit) {
+                throw { message: `超过大小限制(${formatBytes(sizeLimit)})` };
+            }
             setUploadStatus(fileId, "正在计算 MD5...", 0);
             let md5 = await calculateMD5(file);
             await doUploadXHR(fileId, file, md5, "", decision.name, decision.overwrite);
         } catch (err) {
-            setUploadStatus(fileId, "失败: " + err, 0, true);
+            setUploadStatus(fileId, "失败: " + errMessage(err), 0, true);
+        } finally {
+            finishUploadTask();
         }
     }
 }
@@ -3344,6 +3603,40 @@ function askUploadConflict(file) {
 
 // ================= MD5 / XHR 上传核心 =================
 
+// ---- 批次状态与服务端配置 ----
+//  - _pendingUploadTasks: 本批还有多少任务未到终态。MD5 计算中的任务不在
+//    currentXHRs 里,单看 currentXHRs 会把"MD5 中"误判成"全部结束";
+//  - _needRefreshAfterUpload: 本批有文件真正上传成功过,整批结束后统一
+//    刷新一次目录与存储条(此前每个文件成功都 loadPath 一遍,多文件时列表反复重建);
+//  - _uploadsCancelled: 用户点了"取消",MD5 分片循环与批次循环都会检查它。
+let _pendingUploadTasks = 0;
+let _needRefreshAfterUpload = false;
+let _uploadsCancelled = false;
+
+// 服务端只读配置(/api/config),懒加载缓存;拉不到时返回空对象(跳过预检)
+let _serverConfig = null;
+async function getServerConfig() {
+    if (_serverConfig) return _serverConfig;
+    try {
+        const res = await fetch(`${CONFIG.API_BASE}/api/config`);
+        if (res.ok) _serverConfig = await res.json();
+    } catch (_) { /* 网络失败不阻塞上传,只是跳过预检 */ }
+    return _serverConfig || {};
+}
+
+/** 任务终态统一出口:计数归零时收尾整批(标题 + 单次刷新)。 */
+function finishUploadTask() {
+    _pendingUploadTasks = Math.max(0, _pendingUploadTasks - 1);
+    if (_pendingUploadTasks === 0) {
+        updateUploadTitle("completed");
+        if (_needRefreshAfterUpload) {
+            _needRefreshAfterUpload = false;
+            if (currentView === "files") loadPath(currentPath);
+            updateStorage();
+        }
+    }
+}
+
 function calculateMD5(file) {
     return new Promise((resolve, reject) => {
         const spark = new SparkMD5.ArrayBuffer();
@@ -3353,6 +3646,8 @@ function calculateMD5(file) {
         let currentChunk = 0;
 
         fileReader.onload = function(e) {
+            // 用户点了"取消"后立即停止后续分片 -- 大文件的 MD5 可能耗时数分钟
+            if (_uploadsCancelled) { reject("已取消"); return; }
             spark.append(e.target.result);
             currentChunk++;
             if (currentChunk < chunks) loadNext();
@@ -3382,14 +3677,23 @@ function doUploadXHR(id, file, md5, relativePath = "", resolvedName = "", overwr
             delete currentXHRs[id];
             if (xhr.status === 200) {
                 setUploadStatus(id, "已完成", 100, false, true);
+                // 整批结束后统一刷新一次目录(finishUploadTask),不再每个文件刷一遍
+                _needRefreshAfterUpload = true;
                 resolve();
-                if (currentView === "files") loadPath(currentPath);
-                updateStorage();
-            } else reject(xhr.responseText || "服务器错误");
+            } else {
+                // 解析后端 JSON 错误(detail 字段),给用户可读信息而不是原始响应体;
+                // 带 status 供调用方识别 409(文件夹上传同名冲突)等场景
+                let msg = `HTTP ${xhr.status}`;
+                try {
+                    const body = JSON.parse(xhr.responseText);
+                    if (body && (body.detail || body.error)) msg = body.detail || body.error;
+                } catch (_) { /* 响应不是 JSON */ }
+                reject({ message: msg, status: xhr.status });
+            }
         };
 
-        xhr.onerror = () => { delete currentXHRs[id]; reject("网络中断"); };
-        xhr.onabort = () => { delete currentXHRs[id]; reject("已取消"); };
+        xhr.onerror = () => { delete currentXHRs[id]; reject({ message: "网络中断" }); };
+        xhr.onabort = () => { delete currentXHRs[id]; reject({ message: "已取消" }); };
 
         const fd = new FormData();
         // 重命名时：用 resolvedName 构造一个新 File 对象，保留原 blob/type。
@@ -3435,15 +3739,12 @@ async function setUploadStatus(id, text, percent, isError=false, isDone=false) {
 
     if (isError) {
         rightBox.innerHTML = `<span style="color:#d93025; font-size:12px;">${escapeHtml(text)}</span>`;
-        // 失败也是终态：检查是否还有未结束的任务，没有就切到 "已完成"
-        refreshUploadTitleAfterTaskEnd();
+        // 终态收尾(标题/统一刷新)由任务循环的 finally -> finishUploadTask 处理
         return;
     }
     if (isDone) {
         // 成功图标
         rightBox.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="#0F9D58"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
-        // 成功也是终态：同样按 currentXHRs 是否清空决定是否切到 "已完成"
-        refreshUploadTitleAfterTaskEnd();
         return;
     }
 
@@ -3481,27 +3782,30 @@ function updateUploadTitle(status) {
 }
 
 /**
- * 任意一个上传任务结束（成功 / 失败 / 取消）后调用：根据 currentXHRs 是否清空
- * 决定切到 "completed" 还是保持 "uploading"。
- * 集中这一个判定点，避免在每个 onload / onerror / onabort 处都重复判断。
+ * 任务收尾判定已迁移到 finishUploadTask(基于 _pendingUploadTasks 计数,
+ * 覆盖"MD5 计算中"这类不在 currentXHRs 里的任务),此函数保留仅为兼容。
  */
 function refreshUploadTitleAfterTaskEnd() {
-    if (Object.keys(currentXHRs).length === 0) {
+    if (_pendingUploadTasks === 0) {
         updateUploadTitle("completed");
     }
-    // 仍有活跃任务：标题保持 "正在上传"，无需变化
 }
 
 function formatBytes(bytes) {
-    if (bytes === 0) return "-";
+    if (!Number.isFinite(bytes) || bytes <= 0) return "-";
     const k = 1024, sizes = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
 function formatDate(timestamp) {
     const d = new Date(timestamp * 1000);
-    return `${d.getMonth()+1}月${d.getDate()}日`;
+    const now = new Date();
+    // 同一年的文件省略年份;跨年文件带年份,避免无法区分
+    if (d.getFullYear() === now.getFullYear()) {
+        return `${d.getMonth()+1}月${d.getDate()}日`;
+    }
+    return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
 }
 
 // 单一事实：根据 isDir + ext 给出图标名（如 "file" / "code" / "md"）。
@@ -3569,7 +3873,7 @@ async function updateStorage() {
     try {
         const res = await fetch(`${CONFIG.API_BASE}/api/storage`);
         const data = await res.json();
-        const fill = (data.used / data.total) * 100;
+        const fill = data.total > 0 ? (data.used / data.total) * 100 : 0;
         document.getElementById("storageFill").style.width = fill + "%";
         document.getElementById("storageText").innerText = `已使用 ${formatBytes(data.used)}，共 ${formatBytes(data.total)}`;
     } catch (e) { console.error(e); }
@@ -3592,6 +3896,8 @@ function updateBreadcrumb() {
         return;
     }
     // files 视图:Home + 每级目录;Home 走 navFilesClick() 回到根目录并擦掉 ?path= / ?view=
+    // 路径段导航由 #breadcrumb 容器上的事件委托处理(读取 data-path),
+    // 不再内嵌 onclick 字符串 -- 含单引号的目录名曾让 onclick 语法报错。
     let html = `<span onclick="event.stopPropagation(); navFilesClick()">Home</span>`;
     if (currentPath) {
         const parts = currentPath.split("/").filter((p) => p);
@@ -3603,7 +3909,7 @@ function updateBreadcrumb() {
             // 非末段挂 data-path,truncateBreadcrumb 隐藏后能凭此还原出 path,
             // 供省略号下拉菜单做"点击跳转回该目录"。
             const dataPath = isLast ? "" : ` data-path="${escapeAttr(cur)}"`;
-            html += `<span class="separator"><svg class="a-s-fa-Ha-pa c-qd" width="24" height="24" viewBox="0 0 24 24" focusable="false" fill="rgb(116,119,117)"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path></svg></span><span${cls}${dataPath} onclick="event.stopPropagation(); loadPath('${escapeAttr(cur)}')" title="${escapeAttr(p)}">${escapeHtml(p)}</span>`;
+            html += `<span class="separator"><svg class="a-s-fa-Ha-pa c-qd" width="24" height="24" viewBox="0 0 24 24" focusable="false" fill="rgb(116,119,117)"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"></path></svg></span><span${cls}${dataPath} title="${escapeAttr(p)}">${escapeHtml(p)}</span>`;
         });
     }
     bc.innerHTML = html;
@@ -3969,29 +4275,19 @@ function handlePathKeydown(event) {
 }
 
 /**
- * 搜索：同时支持纯文本子串匹配和简单 glob：
+ * 搜索:同时支持纯文本子串匹配和简单 glob：
  *  - 输入含 * 或 ? 时，按 glob 解析为正则（* 匹配任意串、? 匹配单个字符）
- *    例如 *.json → /^.*\.json$/i
+ *    例如 *.json -> /^.*\.json$/i
  *  - 否则按大小写不敏感的子串匹配
  *
- * 实现说明：用 textContent + trim 而不是 innerText，因为：
- *  1) 某些浏览器对内联 SVG 子节点返回的 innerText 不可预测
- *  2) 模板里可能存在换行/空白导致 trim 前后不一致
- *  3) textContent 不依赖 layout，对 display:none 的行也能正确取值
+ * 过滤作用于数据源(currentItemsList -> displayedItems)后整体重渲染,
+ * 而不是操作 DOM 行:虚拟滚动(>=200 条只渲染可见行)场景下,
+ * 遍历 DOM 做 display:none 既搜不到未渲染的行,滚动重渲染后结果还会丢失。
  */
-function handleSearch() {
-    const raw = document.getElementById("searchInput").value.trim();
-    if (!raw) {
-        // 空查询：恢复所有行
-        document.querySelectorAll("#fileTableBody tr").forEach(row => { row.style.display = ""; });
-        return;
-    }
-
-    let matcher;
+function buildSearchMatcher(raw) {
     if (raw.includes("*") || raw.includes("?")) {
         // 字符级把 glob 转成正则：
-        //   * → .*   ? → .   正则元字符自动转义
-        // 用 ?<!\\) 负向先行保证我们不会重复转义已经处理过的 \
+        //   * -> .*   ? -> .   正则元字符自动转义
         let pattern = "";
         for (let i = 0; i < raw.length; i++) {
             const ch = raw[i];
@@ -4001,20 +4297,27 @@ function handleSearch() {
             else pattern += ch;
         }
         // 整名匹配（^/$ 锚定），符合 glob 语义
-        matcher = new RegExp("^" + pattern + "$", "i");
-    } else {
-        // 纯文本：大小写不敏感子串
-        const needle = raw.toLowerCase();
-        matcher = { test: (s) => String(s).toLowerCase().includes(needle) };
+        return new RegExp("^" + pattern + "$", "i");
     }
+    // 纯文本：大小写不敏感子串
+    const needle = raw.toLowerCase();
+    return { test: (s) => String(s).toLowerCase().includes(needle) };
+}
 
-    document.querySelectorAll("#fileTableBody tr").forEach(row => {
-        const nameCell = row.querySelector(".file-name-cell");
-        if (nameCell) {
-            // 优先用 span 里的纯文件名（不含图标 SVG），兜底用 textContent
-            const nameSpan = nameCell.querySelector("span");
-            const name = (nameSpan ? nameSpan.textContent : nameCell.textContent).trim();
-            row.style.display = matcher.test(name) ? "" : "none";
-        }
-    });
+/** 按当前 searchQuery 重建 displayedItems;无搜索时直接复用 currentItemsList 引用。 */
+function rebuildDisplayedItems() {
+    if (!searchQuery) {
+        displayedItems = currentItemsList;
+        return;
+    }
+    const matcher = buildSearchMatcher(searchQuery);
+    displayedItems = currentItemsList.filter(
+        it => it && matcher.test(String(it.name || "")),
+    );
+}
+
+function handleSearch() {
+    const raw = document.getElementById("searchInput").value.trim();
+    searchQuery = raw;
+    renderTableBody();
 }

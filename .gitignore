@@ -23,4 +23,4 @@ wheels/
 # project
 .claude
 *.zip
-archive/
+archived_icons/

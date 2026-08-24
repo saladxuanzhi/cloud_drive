@@ -40,6 +40,14 @@ TRASH_DB_FILE = os.path.join(TRASH_DIR, "trash_db.json")
 LOG_DIR = os.path.join(DRIVE_DATA_DIR, "log")
 AUDIT_LOG_FILE = os.path.join(LOG_DIR, "audit.log")
 ICONS_DIR = Path(__file__).parent / "icons"
+VENDOR_DIR = Path(__file__).parent / "vendor"
+# 前端静态资源根目录:以 main.py 所在目录为准,不依赖进程工作目录。
+_BASE_DIR = Path(__file__).parent
+
+# 监听地址:默认只绑回环地址,由 Nginx 反代对外。
+# 需要直连(如本机开发)时显式设置 HOST=0.0.0.0。
+HOST = os.getenv("HOST", "127.0.0.1")
+PORT = int(os.getenv("PORT", "8000"))
 
 # 票据有效期与限流
 COPY_LINK_TTL = int(os.getenv("COPY_LINK_TTL", "3600"))                # 1 小时
@@ -67,8 +75,9 @@ TICKET_FAIL_WINDOW = 300
 TICKET_FAIL_THRESHOLD = 10
 TICKET_FAIL_LOCKOUT = 900
 
-# Nginx 反代时是否信任 X-Forwarded-For。直连部署请设为 false。
-TRUST_PROXY = os.getenv("TRUST_PROXY", "true").lower() in ("1", "true", "yes")
+# Nginx 反代时是否信任 X-Forwarded-For。默认 false(安全侧):
+# 直连部署时客户端可伪造 XFF 绕过限流与锁定,必须只在确认有可信反代时开启。
+TRUST_PROXY = os.getenv("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
 
 # 二级路径前缀(留空 = 跑在根路径)。配合 Nginx 反代时使用,例如:
 #   location /cloud-drive/ { proxy_pass http://127.0.0.1:8000/; ... }
@@ -183,11 +192,20 @@ def _validate_and_init_dirs() -> None:
             f"请检查路径是否合法、所在父目录是否存在且可写。"
         ) from e
 
-    # 3. 校验确实可读可写(防止挂载只读卷等情况)
-    if not os.access(str(root), os.R_OK | os.W_OK | os.X_OK):
+    # 3. 校验权限(防止挂载只读卷等情况)。
+    #    CLOUD_DRIVE_ROOT 本身只需要可读可进入 -- 典型部署里它是 root 属主
+    #    755 的父目录(如 /home),普通用户对它无写权限是正常且安全的;
+    #    应用实际写入的是 USER_ROOT(文件操作)与 DRIVE_DATA_DIR(回收站/
+    #    临时文件/日志),对这两个目录才要求可写。
+    if not os.access(str(root), os.R_OK | os.X_OK):
         raise RuntimeError(
-            f"CLOUD_DRIVE_ROOT={root} 不可读/写/执行。请检查权限或挂载状态。"
+            f"CLOUD_DRIVE_ROOT={root} 不可读/不可进入。请检查权限或挂载状态。"
         )
+    for _dir, _label in ((USER_ROOT, "USER_ROOT"), (DRIVE_DATA_DIR, "DRIVE_DATA_DIR")):
+        if not os.access(str(_dir), os.R_OK | os.W_OK | os.X_OK):
+            raise RuntimeError(
+                f"{_label}={_dir} 不可读/写/执行。请检查权限或挂载状态。"
+            )
 
     # 4. 校验 USER_ROOT 在 CLOUD_DRIVE_ROOT 之内
     user_root_resolved = Path(USER_ROOT).resolve()
@@ -359,6 +377,65 @@ def _ticket_record_success(ip: str) -> None:
         _ticket_fail_lockouts.pop(ip, None)
 
 
+# ================= 后台维护任务 =================
+# 单个 daemon 线程周期性执行:
+#   1. 清理各限流器中已过期的 key -- cleanup() 若无人调用,一次性 IP 的空
+#      bucket 只在同一 key 再次请求时才被清掉,会永久累积占内存;
+#   2. 删除 TEMP_DIR 中的孤儿 zip -- 用户点了"下载文件夹"但从未兑换
+#      ticket(票据过期/页面关闭)时,zip 会一直留在 .tmp 里吃磁盘。
+_MAINTENANCE_INTERVAL = 900  # 15 分钟
+
+
+def _cleanup_temp_files() -> None:
+    """删除超过存活期的临时文件。zip 的生命周期由 DIRECT_DOWNLOAD_TTL 决定,
+    乘 2 留余量(ticket 过期后短暂时间内兑换流程仍可能读取)。"""
+    max_age = max(DIRECT_DOWNLOAD_TTL * 2, 600)
+    cutoff = time.time() - max_age
+    tmp_dir = Path(TEMP_DIR)
+    if not tmp_dir.exists():
+        return
+    for p in tmp_dir.iterdir():
+        try:
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _maintenance_loop() -> None:
+    while True:
+        time.sleep(_MAINTENANCE_INTERVAL)
+        try:
+            for limiter in (
+                _rate_upload, _rate_list, _rate_ticket,
+                _rate_folder_ticket, _rate_share,
+            ):
+                limiter.cleanup()
+            _cleanup_temp_files()
+        except Exception:
+            error_logger.exception("后台维护任务异常")
+
+
+_maintenance_started = False
+_maintenance_start_lock = threading.Lock()
+
+
+def _start_maintenance_thread() -> None:
+    global _maintenance_started
+    with _maintenance_start_lock:
+        if _maintenance_started:
+            return
+        _maintenance_started = True
+        threading.Thread(
+            target=_maintenance_loop, name="cloud-drive-maintenance", daemon=True,
+        ).start()
+
+
+# 启动时先清一次历史遗留,再进入周期循环
+_cleanup_temp_files()
+_start_maintenance_thread()
+
+
 # ================= FastAPI 应用 =================
 app = FastAPI(title="Single-User Cloud Drive", root_path=BASE_PATH)
 
@@ -387,6 +464,25 @@ async def add_security_headers(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     # 文件下载/预览多数为 inline,可加 Referrer-Policy 减少跨站泄露
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    # 防点击劫持:页面不允许被嵌入任何 iframe
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    # CSP:脚本只允许同源(前端第三方库已本地托管到 /vendor/)。
+    # index.html 内有内联脚本、DOM 中大量使用内联事件处理器与内联 style,
+    # 因此 script/style 需要 'unsafe-inline' -- 即便如此,script-src 仍会
+    # 阻断其它任何来源的脚本注入,是兜底 XSS 的缓解手段。
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' blob: data:; "
+        "media-src 'self' blob:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'",
+    )
     return response
 
 
@@ -453,9 +549,10 @@ def _purge_expired_tickets() -> None:
 
 
 # ================= 前端页面托管 =================
+# 静态资源一律以 main.py 所在目录为基准,不依赖进程工作目录。
 @app.get("/")
 def serve_frontend():
-    index_path = Path("index.html")
+    index_path = _BASE_DIR / "index.html"
     if index_path.exists():
         return FileResponse(index_path)
     return JSONResponse(status_code=404, content={"error": "未找到 index.html"})
@@ -463,7 +560,7 @@ def serve_frontend():
 
 @app.get("/style.css")
 def serve_css():
-    css_path = Path("style.css")
+    css_path = _BASE_DIR / "style.css"
     if css_path.exists():
         return FileResponse(css_path, media_type="text/css")
     return JSONResponse(
@@ -474,7 +571,7 @@ def serve_css():
 
 @app.get("/script.js")
 def serve_script():
-    script_path = Path("script.js")
+    script_path = _BASE_DIR / "script.js"
     if script_path.exists():
         return FileResponse(script_path, media_type="application/javascript")
     return JSONResponse(status_code=404, content={"error": "未找到 script.js"})
@@ -496,6 +593,34 @@ def get_icon(name: str):
     return FileResponse(icon_path, media_type="image/svg+xml")
 
 
+# ================= 前端第三方库本地托管 =================
+# spark-md5 / marked / dompurify / artplayer 均从 vendor/ 本地提供,
+# 不再依赖外部 CDN:规避供应链风险、断网/内网环境页面功能不可用的问题。
+# 文件名只允许字母/数字/点/下划线/连字符,杜绝路径穿越。
+_SAFE_VENDOR_NAME = re.compile(r"^[A-Za-z0-9._\-]+$")
+
+_VENDOR_MIME = {
+    ".js": "application/javascript",
+    ".css": "text/css",
+    ".map": "application/json",
+}
+
+
+@app.get("/vendor/{filename}")
+def get_vendor_file(filename: str):
+    if not _SAFE_VENDOR_NAME.match(filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    file_path = VENDOR_DIR / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"'{filename}' not found")
+    suffix = file_path.suffix.lower()
+    return FileResponse(
+        file_path,
+        media_type=_VENDOR_MIME.get(suffix, "application/octet-stream"),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 # ================= 核心安全验证方法 =================
 def get_safe_path(rel_path: str) -> Path:
     """把用户传入的相对路径解析为绝对路径并做越界检查。
@@ -510,13 +635,39 @@ def get_safe_path(rel_path: str) -> Path:
     return target
 
 
-def load_json(filepath):
-    with open(filepath, "r", encoding="utf-8") as f:
-        return json.load(f)
+# trash_db.json / .pinned.json 的读-改-写互斥锁:
+# FastAPI 的 sync 端点跑在线程池里,并发请求同时"读整个 JSON -> 修改 -> 写回"
+# 会互相覆盖丢数据,所有涉及这两个文件的端点都必须在锁内完成整个读改写周期。
+# RLock:toggle_pin 内部会调用 _load_valid_pins(它自己也取锁),可重入。
+_json_state_lock = threading.RLock()
+
+
+def load_json(filepath, default=None):
+    """读取 JSON 状态文件,容错处理:
+    - 文件不存在 -> 返回 default;
+    - 内容损坏(JSONDecodeError)-> 把坏文件改名 .corrupt-<uuid> 留档,
+      记 error 日志,返回 default,而不是让所有相关端点一起 500。"""
+    path = Path(filepath)
+    if not path.exists():
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        backup = path.with_name(f"{path.name}.corrupt-{uuid.uuid4().hex[:8]}")
+        try:
+            os.replace(str(path), str(backup))
+            error_logger.error(
+                "状态文件损坏已隔离: %s -> %s (%s)", path, backup, e,
+            )
+        except OSError:
+            error_logger.error("状态文件损坏且隔离失败: %s (%s)", path, e)
+        return default
 
 
 def save_json(filepath, data):
-    """原子写:先写临时文件再 os.replace,避免崩溃时半截文件。"""
+    """原子写:先写临时文件再 os.replace,避免崩溃时半截文件。
+    调用方应持有 _json_state_lock(读-改-写整个周期)。"""
     tmp = f"{filepath}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
@@ -609,6 +760,13 @@ def _require_rate(limiter: RateLimiter, request: Request) -> None:
 
 
 # ================= 基础/单项操作 API =================
+@app.get("/api/config")
+def get_config():
+    """前端启动需要的只读配置。目前用于上传前的客户端体积预检,
+    避免大文件在浏览器里白算一遍 MD5 后才被后端 413 拒掉。"""
+    return {"max_upload_size": MAX_UPLOAD_SIZE}
+
+
 @app.get("/api/storage")
 def get_storage(request: Request):
     _require_rate(_rate_list, request)
@@ -750,8 +908,10 @@ class PinReq(BaseModel):
 
 
 def _load_valid_pins():
-    """读取固定列表,顺带清理已不存在的目录。"""
-    pins = load_json(PINNED_FILE)
+    """读取固定列表,顺带清理已不存在的目录。调用方应持有 _json_state_lock。"""
+    pins = load_json(PINNED_FILE, default=[])
+    if not isinstance(pins, list):
+        pins = []
     valid = []
     for p in pins:
         try:
@@ -768,7 +928,8 @@ def _load_valid_pins():
 @app.get("/api/pinned")
 def get_pinned(request: Request):
     _require_rate(_rate_list, request)
-    return {"pinned": _load_valid_pins()}
+    with _json_state_lock:
+        return {"pinned": _load_valid_pins()}
 
 
 @app.post("/api/action/pin")
@@ -778,14 +939,15 @@ def toggle_pin(req: PinReq, request: Request):
     target = get_safe_path(path)
     if not target.exists() or not target.is_dir():
         raise HTTPException(404, "目录不存在,无法固定")
-    pins = _load_valid_pins()
-    if path in pins:
-        pins.remove(path)
-        pinned = False
-    else:
-        pins.append(path)
-        pinned = True
-    save_json(PINNED_FILE, pins)
+    with _json_state_lock:
+        pins = _load_valid_pins()
+        if path in pins:
+            pins.remove(path)
+            pinned = False
+        else:
+            pins.append(path)
+            pinned = True
+        save_json(PINNED_FILE, pins)
     log_audit("PIN_TOGGLE", request, path=path, pinned=pinned)
     return {"success": True, "pinned": pinned, "pinned_list": pins}
 
@@ -794,23 +956,26 @@ def toggle_pin(req: PinReq, request: Request):
 @app.get("/api/trash")
 def list_trash(request: Request):
     _require_rate(_rate_list, request)
-    trash_db = load_json(TRASH_DB_FILE)
-    valid_trash = {}
-    items = []
-    for trashed_name, meta in trash_db.items():
-        p = Path(TRASH_DIR) / trashed_name
-        if p.exists():
-            valid_trash[trashed_name] = meta
-            items.append({
-                "trashed_name": trashed_name,
-                "original_path": meta["original_path"],
-                "name": Path(meta["original_path"]).name,
-                "deleted_at": meta["deleted_at"],
-                "is_dir": meta.get("is_dir", False),
-                "size": meta.get("size", 0),
-            })
-    if len(valid_trash) != len(trash_db):
-        save_json(TRASH_DB_FILE, valid_trash)
+    with _json_state_lock:
+        trash_db = load_json(TRASH_DB_FILE, default={})
+        if not isinstance(trash_db, dict):
+            trash_db = {}
+        valid_trash = {}
+        items = []
+        for trashed_name, meta in trash_db.items():
+            p = Path(TRASH_DIR) / trashed_name
+            if p.exists():
+                valid_trash[trashed_name] = meta
+                items.append({
+                    "trashed_name": trashed_name,
+                    "original_path": meta["original_path"],
+                    "name": Path(meta["original_path"]).name,
+                    "deleted_at": meta["deleted_at"],
+                    "is_dir": meta.get("is_dir", False),
+                    "size": meta.get("size", 0),
+                })
+        if len(valid_trash) != len(trash_db):
+            save_json(TRASH_DB_FILE, valid_trash)
     items.sort(key=lambda x: x["deleted_at"], reverse=True)
     return {"items": items}
 
@@ -822,34 +987,37 @@ class BulkTrashReq(BaseModel):
 @app.post("/api/action/bulk_trash")
 def bulk_trash(req: BulkTrashReq, request: Request):
     """批量移入回收站,返回每项结果,前端可展示具体失败原因。"""
-    trash_db = load_json(TRASH_DB_FILE)
-    moved = 0
-    errors = []
-    for path_str in req.paths:
-        try:
-            src = get_safe_path(path_str)
-            if not src.exists():
-                errors.append(f"{path_str}:源不存在")
-                continue
-            trash_id = str(uuid.uuid4())
-            trashed_name = f"{trash_id}_{src.name}"
-            dst = Path(TRASH_DIR) / trashed_name
-            is_dir = src.is_dir()
+    with _json_state_lock:
+        trash_db = load_json(TRASH_DB_FILE, default={})
+        if not isinstance(trash_db, dict):
+            trash_db = {}
+        moved = 0
+        errors = []
+        for path_str in req.paths:
             try:
-                size = 0 if is_dir else src.stat().st_size
-            except OSError:
-                size = 0
-            shutil.move(str(src), str(dst))
-            trash_db[trashed_name] = {
-                "original_path": path_str,
-                "deleted_at": time.time(),
-                "is_dir": is_dir,
-                "size": size,
-            }
-            moved += 1
-        except Exception as e:
-            errors.append(f"{path_str}:{e}")
-    save_json(TRASH_DB_FILE, trash_db)
+                src = get_safe_path(path_str)
+                if not src.exists():
+                    errors.append(f"{path_str}:源不存在")
+                    continue
+                trash_id = str(uuid.uuid4())
+                trashed_name = f"{trash_id}_{src.name}"
+                dst = Path(TRASH_DIR) / trashed_name
+                is_dir = src.is_dir()
+                try:
+                    size = 0 if is_dir else src.stat().st_size
+                except OSError:
+                    size = 0
+                shutil.move(str(src), str(dst))
+                trash_db[trashed_name] = {
+                    "original_path": path_str,
+                    "deleted_at": time.time(),
+                    "is_dir": is_dir,
+                    "size": size,
+                }
+                moved += 1
+            except Exception as e:
+                errors.append(f"{path_str}:{e}")
+        save_json(TRASH_DB_FILE, trash_db)
     log_audit("BULK_TRASH", request, count=moved, errors=len(errors))
     return {"success": True, "count": moved, "errors": errors}
 
@@ -861,33 +1029,36 @@ class BulkRestoreReq(BaseModel):
 @app.post("/api/action/bulk_restore")
 def bulk_restore(req: BulkRestoreReq, request: Request):
     """批量从回收站中还原,返回每项结果。"""
-    trash_db = load_json(TRASH_DB_FILE)
-    moved = 0
-    errors = []
-    for name in req.trashed_names:
-        if name not in trash_db:
-            errors.append(f"{name}:不在回收站中")
-            continue
-        try:
-            meta = trash_db[name]
-            src = Path(TRASH_DIR) / name
-            if not src.exists():
-                errors.append(f"{name}:回收站文件已丢失")
-                # 同步清理 DB
-                trash_db.pop(name, None)
+    with _json_state_lock:
+        trash_db = load_json(TRASH_DB_FILE, default={})
+        if not isinstance(trash_db, dict):
+            trash_db = {}
+        moved = 0
+        errors = []
+        for name in req.trashed_names:
+            if name not in trash_db:
+                errors.append(f"{name}:不在回收站中")
                 continue
-            dst = get_safe_path(meta["original_path"])
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
-                # 重名处理:附加 _restored_<ts> 后缀
-                suffix = f"_restored_{int(time.time())}"
-                dst = dst.parent / f"{dst.stem}{suffix}{dst.suffix}"
-            shutil.move(str(src), str(dst))
-            trash_db.pop(name, None)
-            moved += 1
-        except Exception as e:
-            errors.append(f"{name}:{e}")
-    save_json(TRASH_DB_FILE, trash_db)
+            try:
+                meta = trash_db[name]
+                src = Path(TRASH_DIR) / name
+                if not src.exists():
+                    errors.append(f"{name}:回收站文件已丢失")
+                    # 同步清理 DB
+                    trash_db.pop(name, None)
+                    continue
+                dst = get_safe_path(meta["original_path"])
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    # 重名处理:附加 _restored_<ts> 后缀
+                    suffix = f"_restored_{int(time.time())}"
+                    dst = dst.parent / f"{dst.stem}{suffix}{dst.suffix}"
+                shutil.move(str(src), str(dst))
+                trash_db.pop(name, None)
+                moved += 1
+            except Exception as e:
+                errors.append(f"{name}:{e}")
+        save_json(TRASH_DB_FILE, trash_db)
     log_audit("BULK_RESTORE", request, count=moved, errors=len(errors))
     return {"success": True, "count": moved, "errors": errors}
 
@@ -899,25 +1070,28 @@ class BulkDeletePermanentlyReq(BaseModel):
 @app.post("/api/action/bulk_delete_permanently")
 def bulk_delete_permanently(req: BulkDeletePermanentlyReq, request: Request):
     """批量永久删除(不可撤销),返回每项结果。"""
-    trash_db = load_json(TRASH_DB_FILE)
-    deleted = 0
-    errors = []
-    for name in req.trashed_names:
-        if name not in trash_db:
-            errors.append(f"{name}:不在回收站中")
-            continue
-        try:
-            src = Path(TRASH_DIR) / name
-            if src.exists():
-                if src.is_dir() and not src.is_symlink():
-                    shutil.rmtree(src)
-                else:
-                    src.unlink()
-            trash_db.pop(name, None)
-            deleted += 1
-        except Exception as e:
-            errors.append(f"{name}:{e}")
-    save_json(TRASH_DB_FILE, trash_db)
+    with _json_state_lock:
+        trash_db = load_json(TRASH_DB_FILE, default={})
+        if not isinstance(trash_db, dict):
+            trash_db = {}
+        deleted = 0
+        errors = []
+        for name in req.trashed_names:
+            if name not in trash_db:
+                errors.append(f"{name}:不在回收站中")
+                continue
+            try:
+                src = Path(TRASH_DIR) / name
+                if src.exists():
+                    if src.is_dir() and not src.is_symlink():
+                        shutil.rmtree(src)
+                    else:
+                        src.unlink()
+                trash_db.pop(name, None)
+                deleted += 1
+            except Exception as e:
+                errors.append(f"{name}:{e}")
+        save_json(TRASH_DB_FILE, trash_db)
     log_audit("BULK_DELETE_PERMANENT", request, count=deleted, errors=len(errors))
     return {"success": True, "count": deleted, "errors": errors}
 
@@ -986,11 +1160,12 @@ def generate_folder_download_ticket(req: ActionReq, request: Request):
 
 def _build_share_url(request: Request, ticket_id: str) -> str:
     """构造分享链接。优先使用环境变量 PUBLIC_BASE_URL(避免 Host 头伪造);
-    未配置时回退到 request.base_url(自动包含 root_path)。"""
+    未配置时回退到 request.base_url(自动包含 root_path)。
+    注意:PUBLIC_BASE_URL 是"完整公开基础 URL",已包含任何二级路径前缀
+    (例如 https://example.com/cloud-drive),这里不会再拼接 BASE_PATH。"""
     public_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
     if public_base:
-        # PUBLIC_BASE_URL 已经包含了 base_path 形式(如 https://example.com/cloud-drive)
-        return f"{public_base}{BASE_PATH}/api/download/file?ticket={ticket_id}"
+        return f"{public_base}/api/download/file?ticket={ticket_id}"
     # request.base_url 在设置了 root_path 后会自动包含前缀, 不需要手动加
     base = str(request.base_url).rstrip("/")
     return f"{base}/api/download/file?ticket={ticket_id}"
@@ -1211,6 +1386,11 @@ async def upload_file(
                 if seg and seg != "." and seg != "..":
                     _validate_basename(seg)
             final_path = get_safe_path(f"{path.strip('/')}/{rel}")
+            # 同名冲突检查:与单文件模式行为对齐 -- 未显式确认覆盖时返回 409,
+            # 由前端弹窗让用户决定(覆盖 / 跳过 / 取消),而不是静默覆盖。
+            if final_path.exists() and not overwrite:
+                temp_path.unlink(missing_ok=True)
+                raise HTTPException(409, f"已存在同名文件:{final_path.name}")
             parent = final_path.parent
             try:
                 parent.mkdir(parents=True, exist_ok=True)
@@ -1276,9 +1456,9 @@ if __name__ == "__main__":
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         stream=_sys.stderr,
     )
-    # 绑定 0.0.0.0(由 Nginx 反代到 127.0.0.1:8000 上去)
+    # 绑定 HOST(默认 127.0.0.1,由 Nginx 反代对外;本机开发可设 HOST=0.0.0.0)。
     # log_level="info" 让 multipart 解析失败、客户端断连等也能进 stderr -> journalctl
     uvicorn.run(
-        app, host="0.0.0.0", port=8000,
+        app, host=HOST, port=PORT,
         log_level="info", access_log=False,
     )

@@ -11,13 +11,19 @@ Environment="CLOUD_DRIVE_ROOT=/home"
 Environment="USER_ROOT=/home/xuanzhi"
 Environment="DRIVE_DATA_DIR=/home/cloud_drive_data"
 
-# 二级路径: 与 Nginx 反代前缀保持一致
-Environment="BASE_PATH=/cloud-drive"
+# 应用跑在根路径(https://drive.realxuanzhi.top:12443 由 Nginx 反代到 127.0.0.1:8000)。
+# 旧的 /cloud-drive 前缀仅由 Nginx 302 跳转到新地址,后端不再需要 BASE_PATH。
+# 若将来要改回二级路径部署,同时设置 BASE_PATH 与 Nginx location 前缀即可。
+# Environment="BASE_PATH=/cloud-drive"
 
-# 分享链接的公开 base URL(必须包含 BASE_PATH)
-Environment="PUBLIC_BASE_URL=https://www.realxuanzhi.top/cloud-drive"
+# 分享链接的公开基础 URL(完整地址,已包含任何二级路径前缀,代码不会拼接 BASE_PATH)
+Environment="PUBLIC_BASE_URL=https://drive.realxuanzhi.top:12443"
 
-# Nginx 反代时取 X-Forwarded-For 作为真实 IP
+# 只监听回环地址,由 Nginx 反代对外;本机调试才设 HOST=0.0.0.0。
+# 确保服务器防火墙/安全组不对外放行 8000 端口。
+Environment="HOST=127.0.0.1"
+
+# Nginx 反代时取 X-Forwarded-For 作为真实 IP(应用默认不信任该头)
 Environment="TRUST_PROXY=true"
 
 # CORS 白名单(没有跨域需求可留空)
@@ -30,13 +36,17 @@ Environment="RATE_LIMIT_TICKET_PER_MIN=60"
 Environment="COPY_LINK_TTL=3600"
 Environment="DIRECT_DOWNLOAD_TTL=60"
 
-# 推荐绑 127.0.0.1(只接受本地 Nginx 反代),避免直接对外暴露
 ExecStart=/home/xuanzhi/.conda/envs/cloud_drive/bin/python /opt/cloud_drive/main.py
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=cloud_drive
+
+# systemd 加固:整个文件系统只读,仅放开应用需要写入的目录
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/cloud_drive_data /home/xuanzhi
 
 [Install]
 WantedBy=multi-user.target

@@ -46,12 +46,14 @@
             }
         })();
     </script>
-    <!-- 引入 SparkMD5 插件 -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
-    <!-- Markdown 渲染（marked.js） -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
-    <!-- DOMPurify:用于消毒 marked 输出的 HTML,防止存储型 XSS -->
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+    <!-- 前端第三方库:本地 vendor/ 托管(与后端同源,版本锁定),不再依赖外部 CDN,
+         规避供应链风险与断网/内网环境不可用的问题 -->
+    <!-- SparkMD5 3.0.2:上传前分片计算 MD5 -->
+    <script src="vendor/spark-md5.min.js"></script>
+    <!-- Markdown 渲染（marked.js 13.0.3） -->
+    <script src="vendor/marked.min.js"></script>
+    <!-- DOMPurify 3.1.6:用于消毒 marked 输出的 HTML,防止存储型 XSS -->
+    <script src="vendor/purify.min.js"></script>
 </head>
 <body data-view="files">
 
