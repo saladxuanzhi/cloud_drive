@@ -78,7 +78,6 @@ script.js            前端逻辑(单文件)
 style.css            样式
 icons/               文件类型图标(按需经 /api/icon/{name} 加载)
 vendor/              前端第三方库(spark-md5 / marked / DOMPurify / artplayer,本地托管)
-tests/               单元测试
 cloud_drive.service  systemd 部署单元
 plan.md              代码审查报告与修改计划
 ```
