@@ -1,4 +1,5 @@
 import os
+import errno
 import shutil
 import json
 import uuid
@@ -1415,15 +1416,34 @@ async def upload_file(
 
         try:
             os.replace(str(temp_path), str(final_path))
-        except FileNotFoundError as e:
-            raise HTTPException(
-                500,
-                f"保存失败:路径不存在 {final_path.parent}({e.strerror or e})",
-            )
-        except PermissionError as e:
-            raise HTTPException(403, f"权限不足:{e}")
         except OSError as e:
-            raise HTTPException(500, f"保存失败:{e}")
+            if e.errno != errno.EXDEV:
+                if isinstance(e, FileNotFoundError):
+                    raise HTTPException(
+                        500,
+                        f"保存失败:路径不存在 {final_path.parent}({e.strerror or e})",
+                    )
+                if isinstance(e, PermissionError):
+                    raise HTTPException(403, f"权限不足:{e}")
+                raise HTTPException(500, f"保存失败:{e}")
+            # EXDEV:TEMP_DIR 与目标目录不在同一文件系统,rename 无法跨设备。
+            # 先复制到目标同盘的隐藏临时文件,再原子替换,保留"落盘即完整"的语义。
+            staging = final_path.parent / f".{final_path.name}.{uuid.uuid4().hex}.uploading"
+            try:
+                shutil.copy2(str(temp_path), str(staging))
+                os.replace(str(staging), str(final_path))
+            except FileNotFoundError as e:
+                raise HTTPException(
+                    500,
+                    f"保存失败:路径不存在 {final_path.parent}({e.strerror or e})",
+                )
+            except PermissionError as e:
+                raise HTTPException(403, f"权限不足:{e}")
+            except OSError as e:
+                raise HTTPException(500, f"保存失败:{e}")
+            finally:
+                staging.unlink(missing_ok=True)
+            temp_path.unlink(missing_ok=True)
 
         log_audit(
             "UPLOAD", request,
