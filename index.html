@@ -21,6 +21,8 @@
     </script>
     <!-- 引入外部 CSS 样式文件 -->
     <link rel="stylesheet" href="style.css">
+    <!-- KaTeX 0.16.47:Markdown 预览中的 $...$ / $$...$$ 数学公式渲染 -->
+    <link rel="stylesheet" href="vendor/katex.min.css">
     <!-- 移动端判定：在 body 解析之前计算,确保 script.js 读取时已就绪 -->
     <script>
         (function () {
@@ -54,6 +56,8 @@
     <script src="vendor/marked.min.js"></script>
     <!-- DOMPurify 3.1.6:用于消毒 marked 输出的 HTML,防止存储型 XSS -->
     <script src="vendor/purify.min.js"></script>
+    <!-- KaTeX 0.16.47:数学公式渲染(字体在 vendor/fonts/,由 /vendor/fonts/ 路由提供) -->
+    <script src="vendor/katex.min.js"></script>
 </head>
 <body data-view="files">
 

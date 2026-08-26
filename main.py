@@ -595,7 +595,7 @@ def get_icon(name: str):
 
 
 # ================= 前端第三方库本地托管 =================
-# spark-md5 / marked / dompurify / artplayer 均从 vendor/ 本地提供,
+# spark-md5 / marked / dompurify / katex / artplayer 均从 vendor/ 本地提供,
 # 不再依赖外部 CDN:规避供应链风险、断网/内网环境页面功能不可用的问题。
 # 文件名只允许字母/数字/点/下划线/连字符,杜绝路径穿越。
 _SAFE_VENDOR_NAME = re.compile(r"^[A-Za-z0-9._\-]+$")
@@ -604,6 +604,9 @@ _VENDOR_MIME = {
     ".js": "application/javascript",
     ".css": "text/css",
     ".map": "application/json",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".ttf": "font/ttf",
 }
 
 
@@ -612,6 +615,23 @@ def get_vendor_file(filename: str):
     if not _SAFE_VENDOR_NAME.match(filename):
         raise HTTPException(status_code=400, detail="Invalid filename")
     file_path = VENDOR_DIR / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"'{filename}' not found")
+    suffix = file_path.suffix.lower()
+    return FileResponse(
+        file_path,
+        media_type=_VENDOR_MIME.get(suffix, "application/octet-stream"),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+# KaTeX 字体:katex.min.css 以相对路径引用 fonts/KaTeX_*.woff2,
+# 需要单独的子路径路由(/vendor/{filename} 不匹配带斜杠的路径)。
+@app.get("/vendor/fonts/{filename}")
+def get_vendor_font(filename: str):
+    if not _SAFE_VENDOR_NAME.match(filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    file_path = VENDOR_DIR / "fonts" / filename
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"'{filename}' not found")
     suffix = file_path.suffix.lower()

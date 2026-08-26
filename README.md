@@ -6,7 +6,7 @@
 
 - 文件/文件夹上传(支持拖拽、文件夹整体上传、MD5 校验、同名冲突处理)
 - 下载(单文件一次性票据、文件夹自动打包 zip)
-- 预览:图片(缩放/翻页)、视频/音频(Artplayer)、文本/代码/Markdown(渲染 + 原文切换)
+- 预览:图片(缩放/翻页)、视频/音频(Artplayer)、文本/代码/Markdown(渲染 + 原文切换,Markdown 支持 `$...$` / `$$...$$` 数学公式,基于 KaTeX)
 - 回收站(还原/永久删除)、固定常用目录、移动/重命名/搜索、限流与审计日志
 
 ## 部署
@@ -77,7 +77,7 @@ index.html           页面骨架
 script.js            前端逻辑(单文件)
 style.css            样式
 icons/               文件类型图标(按需经 /api/icon/{name} 加载)
-vendor/              前端第三方库(spark-md5 / marked / DOMPurify / artplayer,本地托管)
+vendor/              前端第三方库(spark-md5 / marked / DOMPurify / KaTeX / artplayer,本地托管;KaTeX 字体在 vendor/fonts/)
 cloud_drive.service  systemd 部署单元
 plan.md              代码审查报告与修改计划
 ```

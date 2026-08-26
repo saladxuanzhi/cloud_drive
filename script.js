@@ -2554,6 +2554,99 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext, ite
     }
 }
 
+// ================= Markdown 数学公式(KaTeX)================
+// 流程:marked 行内扩展在解析阶段把 $...$ / $$...$$ 截成占位符(纯文本,
+// 能原样通过 DOMPurify 的严格白名单),消毒后再把占位符替换为 KaTeX
+// 渲染结果。分两步而非先渲染再消毒,是因为 LaTeX 源码若先过 markdown 的
+// 转义/强调/代码规则会被破坏(\_ 、x*y*z、` 反引号等);
+// 而行内扩展在代码块/行内代码的记号之前不会触发,天然跳过代码内容。
+let _mdMathStore = [];
+
+const _mdInlineMathExt = {
+    name: "inlineMath",
+    level: "inline",
+    // 告诉 marked:纯文本 token 遇到 $ 要停下来,否则整段被吞掉轮不到本扩展
+    start(src) { return src.indexOf("$"); },
+    tokenizer(src) {
+        if (src[0] !== "$") return;
+        // $$...$$ 展示公式(支持多行)
+        if (src[1] === "$") {
+            const m = /^\$\$([\s\S]+?)\$\$/.exec(src);
+            if (m && m[1].trim()) {
+                return { type: "inlineMath", raw: m[0], latex: m[1].trim(), display: true };
+            }
+            return; // 未闭合的 $$ 按普通文本处理
+        }
+        // $...$ 行内公式。防货币误伤:内容非空、首尾不能是空白、
+        // 闭合 $ 后不能紧跟数字("$5 and $10"、"$100$200" 都不算公式)
+        const m = /^\$(?!\s)((?:\\.|[^$])+?)\$(?!\d)/.exec(src);
+        if (!m || /\s$/.test(m[1])) return;
+        return { type: "inlineMath", raw: m[0], latex: m[1], display: false };
+    },
+    renderer(token) {
+        const i = _mdMathStore.push({ latex: token.latex, display: token.display }) - 1;
+        return `%%MATH${i}%%`;
+    },
+};
+if (typeof marked !== "undefined" && typeof marked.use === "function") {
+    marked.use({ extensions: [_mdInlineMathExt] });
+}
+
+// ================= Markdown 加粗容错 =================
+// CommonMark 规定:闭合 ** 前有空白(或开启 ** 后紧跟空白)时不是强调,
+// 于是 **第一轮 **计划 会原样显示星号。中文写作里这类多余空格很常见,
+// 这里放宽为:仅单侧有空白时仍渲染加粗;两侧都有空白(** foo **)按规范
+// 保持原样。正常写法(**foo**)、斜体(*foo*)与代码块/行内代码不受影响
+// (marked 先对代码分词,扩展根本看不到代码里的内容)。
+// 注意:内容含 * 的写法(**a *b* **)仍按严格规则处理,避免与嵌套
+// 强调/斜体产生歧义。
+const _mdLenientStrongExt = {
+    name: "lenientStrong",
+    level: "inline",
+    tokenizer(src) {
+        if (!src.startsWith("**")) return;
+        // 与 marked 内置 strong token 同构:type/raw/text/tokens
+        const strong = (raw, text) => ({
+            type: "strong", raw, text,
+            tokens: this.lexer.inlineTokens(text),
+        });
+        // 闭合 ** 前有空白:**第一轮 **计划 -- 保留一个空格在加粗内维持间距
+        let m = /^\*\*([^*\n]+?)[ \t]+\*\*(?!\*)/.exec(src);
+        if (m && !/^[ \t]/.test(m[1])) return strong(m[0], m[1] + " ");
+        // 开启 ** 后紧跟空白:** 第一轮**计划 -- 前导空格无法保留,丢弃
+        m = /^\*\*[ \t]+([^*\n]+?)\*\*(?!\*)/.exec(src);
+        if (m && !/[ \t]$/.test(m[1])) return strong(m[0], m[1]);
+    },
+};
+if (typeof marked !== "undefined" && typeof marked.use === "function") {
+    marked.use({ extensions: [_mdLenientStrongExt] });
+}
+
+/**
+ * 单条公式 -> HTML。KaTeX 缺失/渲染失败时退化为行内代码显示原文,
+ * 绝不让一条坏公式破坏整篇文档的渲染。
+ */
+function _renderMdMathHtml(tok) {
+    const fallback = () => `<code class="math-fallback">${escapeHtml(tok.latex)}</code>`;
+    if (typeof katex === "undefined" || typeof katex.renderToString !== "function") {
+        return fallback();
+    }
+    try {
+        const html = katex.renderToString(tok.latex, {
+            displayMode: !!tok.display,
+            throwOnError: false,
+            strict: "ignore",
+            trust: false,
+        });
+        // KaTeX 输出再过一遍 DOMPurify 默认白名单(HTML+MathML+SVG,禁脚本/
+        // 事件属性)作双保险,与"所有进入 innerHTML 的内容都消毒"的原则一致
+        if (typeof DOMPurify !== "undefined") return DOMPurify.sanitize(html);
+        return fallback();
+    } catch (e) {
+        return fallback();
+    }
+}
+
 /**
  * 把文本内容写入预览区：
  *   - md/markdown：默认渲染为 HTML（marked.js），切换按钮可在 渲染 ↔ 原文 之间切
@@ -2582,6 +2675,8 @@ function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
                 renderRaw();
                 return;
             }
+            // 占位符要在 parse 之前清空:renderer 在解析过程中往里写
+            _mdMathStore = [];
             const html = DOMPurify.sanitize(marked.parse(raw), {
                 ALLOWED_TAGS: [
                     "a","b","i","em","strong","code","pre","blockquote",
@@ -2592,10 +2687,19 @@ function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
                 ALLOWED_ATTR: ["href","title","alt","src","colspan","rowspan"],
                 ALLOW_DATA_ATTR: false,
             });
+            // 公式占位符 -> KaTeX HTML(_renderMdMathHtml 内部已消毒;
+            // 原文里恰好出现 %%MATHn%% 字样且序号越界时保持原样)
+            let finalHtml = html;
+            if (_mdMathStore.length) {
+                finalHtml = html.replace(/%%MATH(\d+)%%/g, (m, i) => {
+                    const tok = _mdMathStore[+i];
+                    return tok ? _renderMdMathHtml(tok) : m;
+                });
+            }
             contentEl.innerHTML = "";
             const wrap = document.createElement("div");
             wrap.className = "preview-md";
-            wrap.innerHTML = html;
+            wrap.innerHTML = finalHtml;
             contentEl.appendChild(wrap);
         };
 
