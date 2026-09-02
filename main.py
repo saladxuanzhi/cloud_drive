@@ -13,10 +13,12 @@ from collections import deque
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.formparsers import MultiPartException
 from pydantic import BaseModel
 
 # ================= 配置区 =================
@@ -218,6 +220,8 @@ def _validate_and_init_dirs() -> None:
 
 
 _validate_and_init_dirs()
+import tempfile as _tempfile
+_tempfile.tempdir = TEMP_DIR
 if not Path(PINNED_FILE).exists():
     Path(PINNED_FILE).write_text("[]", encoding="utf-8")
 if not Path(TRASH_DB_FILE).exists():
@@ -1342,14 +1346,7 @@ def preview_file(path: str = "", kind: str = "image", request: Request = None):
 
 # ================= 上传 API =================
 @app.post("/api/upload")
-async def upload_file(
-    request: Request,
-    file: UploadFile = File(...),
-    path: str = Form(""),
-    client_md5: str = Form(...),
-    relative_path: str = Form(""),
-    overwrite: bool = Form(False),
-):
+async def upload_file(request: Request):
     """统一上传入口。
     - 单文件上传:relative_path 留空,最终路径为 path/file.filename。
     - 文件夹上传:relative_path 由前端传入 webkitRelativePath(如 "myfolder/sub/a.txt"),
@@ -1359,8 +1356,32 @@ async def upload_file(
       - 扩展名黑名单(可配置)。
       - 文件名清洗 + 大小上限(流式校验)。
       - 原子替换(os.replace)避免半截文件。
+    注意:这里手动 request.form() 而不用 File()/Form() 依赖注入。
+    FastAPI 注入时不给 request.form() 传 max_part_size,Starlette
+    MultiPartParser 默认单 part 上限 1MB,超 1MB 的文件(PDF 等)会
+    直接 422 "There was an error parsing the body"。
     """
     _require_rate(_rate_upload, request)
+    # +1MB 余量留给 multipart 各字段的头/编码开销
+    try:
+        form = await request.form(max_part_size=MAX_UPLOAD_SIZE + 1024 * 1024)
+    except MultiPartException as e:
+        raise HTTPException(400, f"multipart 解析失败:{e.message}")
+
+    file = form.get("file")
+    if not isinstance(file, StarletteUploadFile):
+        raise HTTPException(422, "缺少文件字段 file")
+    path = form.get("path")
+    if not isinstance(path, str):
+        path = ""
+    client_md5 = form.get("client_md5")
+    if not isinstance(client_md5, str) or not client_md5:
+        raise HTTPException(422, "缺少 client_md5 字段")
+    relative_path = form.get("relative_path")
+    if not isinstance(relative_path, str):
+        relative_path = ""
+    # 前端 overwrite 只在确认覆盖时发 "1"(见 doUploadXHR),其余情况不发该字段
+    overwrite = form.get("overwrite") == "1"
     # 文件名校验
     safe_name = _check_filename_for_upload(file.filename or "")
     temp_path = Path(TEMP_DIR) / str(uuid.uuid4())
