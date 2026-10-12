@@ -478,6 +478,7 @@ window.addEventListener("DOMContentLoaded", () => {
 // closeXxxModal 在主动关闭时会 history.back(), 随之而来的 popstate 是自家副作用,
 // 用 _suppressNextPopstateForXxx 直接吞掉, 防止重复拉取目录。
 window.addEventListener("popstate", () => {
+    window.DriveDrag?.cancel();
     if (_suppressNextPopstateForPreview) {
         _suppressNextPopstateForPreview = false;
         return;
@@ -561,6 +562,7 @@ function navFilesClick() {
 }
 
 function switchToPinnedView() {
+    window.DriveDrag?.cancel();
     currentView = "pinned";
     document.body.setAttribute("data-view", "pinned");
     document.getElementById("navFiles").classList.remove("active");
@@ -578,6 +580,7 @@ function switchToPinnedView() {
 }
 
 function switchToTrashView() {
+    window.DriveDrag?.cancel();
     currentView = "trash";
     document.body.setAttribute("data-view", "trash");
     document.getElementById("navFiles").classList.remove("active");
@@ -613,6 +616,7 @@ function syncPinnedExpander() {
 }
 
 async function loadPath(path) {
+    window.DriveDrag?.cancel();
     // 取消上一次未完成的 /api/files 请求，避免快速切换目录（如点 pinned 后立刻点主目录）
     // 时旧响应迟到覆盖新内容。
     if (currentListController) {
@@ -651,6 +655,7 @@ async function loadPath(path) {
         currentItemsList = data.items;
         renderTableHeader();
         renderTableBody();
+        window.DriveDrag?.refreshTargets();
     } catch (e) {
         // 主动取消的请求不报错
         if (e && e.name === 'AbortError') return;
@@ -805,6 +810,7 @@ function sortItems() {
  * stopPropagation 避免触发 document 的 click-outside-clear-selection 逻辑。
  */
 function handleSortClick(field, event) {
+    if (window.DriveDrag?.isBusy()) return;
     if (event) event.stopPropagation();
     if (sortField === field) {
         sortDirection = sortDirection === "asc" ? "desc" : "asc";
@@ -1021,6 +1027,17 @@ function _buildTableRow(item, index) {
     const ext = item.name.split(".").pop().toLowerCase();
     const tr = document.createElement("tr");
     tr.setAttribute("data-index", index);
+
+    // 拖拽（仅 files 视图）：记录行内条目路径；目录行同时标记为可放置目标。
+    if (currentView === "files") {
+        const path = joinPath(currentPath, item.name);
+        tr.dataset.itemPath = path;
+        if (item.is_dir) {
+            tr.dataset.dropKind = "directory";
+            tr.dataset.dropPath = path;
+        }
+        if (window.DriveDrag?.isSourcePath(path)) tr.classList.add("drive-drag-source");
+    }
 
     // 双击动作:不再用 tr.ondblclick(原生窗口太短),改用 1s 自定义窗口。
     if (currentView === "files" && !item.is_dir) {
@@ -1315,6 +1332,15 @@ function updateSelectionState() {
         selBar.classList.remove("active");
         document.body.classList.remove("has-selection");
     }
+}
+
+/* 拖拽期间隐藏多选操作条、恢复地址栏显示（由 drive_drag.js 在拖拽开始/结束时调用）。 */
+function syncSelectionOverlay() {
+    const visible = selectedItems.length > 0 && !document.body.classList.contains("drive-dragging");
+    const selBar = document.getElementById("selectionBar");
+    const toolbar = document.querySelector(".explorer-toolbar");
+    if (selBar) selBar.setAttribute("aria-hidden", String(!visible));
+    if (toolbar) toolbar.inert = visible;
 }
 
 /* ================= 移动端:侧边栏抽屉 + 行动作面板 =================
@@ -1712,6 +1738,61 @@ async function trashSingle(filename) {
     updateStorage();
 }
 
+// ================= 拖拽移动 / 拖拽回收（供 drive_drag.js 调用） =================
+async function movePaths(paths, targetDir) {
+    try {
+        const res = await fetch(`${CONFIG.API_BASE}/api/action/move`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({paths: paths, target_dir: targetDir})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(`移动失败：${data.detail || `HTTP ${res.status}`}`);
+            return false;
+        }
+        if (data.errors && data.errors.length) {
+            showAlert(`已移动 ${data.moved} 项`, "以下项未移动：\n" + data.errors.join("\n"));
+        } else if (data.moved) {
+            showToast(`已移动 ${data.moved} 项`);
+        }
+        clearSelection();
+        loadPath(currentPath);
+        updateStorage();
+        return true;
+    } catch (e) {
+        showToast(`移动失败：${errMessage(e)}`);
+        return false;
+    }
+}
+
+async function trashPaths(paths) {
+    try {
+        const res = await fetch(`${CONFIG.API_BASE}/api/action/bulk_trash`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({paths: paths})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(`移至回收站失败：${data.detail || `HTTP ${res.status}`}`);
+            return false;
+        }
+        if (data.errors && data.errors.length) {
+            showAlert(`已删除 ${data.count} 项`, "以下项未删除：\n" + data.errors.join("\n"));
+        } else if (data.count) {
+            showToast(`已删除 ${data.count} 项`);
+        }
+        clearSelection();
+        loadPath(currentPath);
+        updateStorage();
+        return true;
+    } catch (e) {
+        showToast(`移至回收站失败：${errMessage(e)}`);
+        return false;
+    }
+}
+
 async function bulkTrash() {
     if (selectedItems.length === 0) return;
     const paths = selectedItems.map(item => joinPath(currentPath, item.name));
@@ -1973,6 +2054,8 @@ let _previewImageIndex = -1;
 // 解决:每次 _loadPreviewImage 调用先 xhr.abort() 旧请求;
 // 再用 _previewImageReqToken 单调递增,onload/onerror 比较 token,过期回调直接忽略。
 let _previewImageXhr = null;
+// PDF 预览：用于超时/关闭时中断预检请求，并停止 iframe 内原生阅读器的后续分段拉取。
+let _previewPdfController = null;
 let _previewImageReqToken = 0;
 
 // 移动端操作面板（mobile-action-sheet）与浏览器历史的协作，含义同上。
@@ -1989,6 +2072,13 @@ function closePreviewModal() {
         try { _activeArtplayer.destroy(true); } catch (e) { console.warn("[closePreviewModal] art.destroy 失败:", e); }
     }
     _activeArtplayer = null;
+    if (_previewPdfController) {
+        _previewPdfController.abort();
+        _previewPdfController = null;
+    }
+    // 清空地址停止原生 PDF 阅读器的后续分段请求。
+    const pdfFrame = overlay.querySelector(".preview-pdf-frame");
+    if (pdfFrame) pdfFrame.src = "about:blank";
     overlay.remove();
     if (_previewKeydownHandler) {
         document.removeEventListener("keydown", _previewKeydownHandler, true);
@@ -2023,6 +2113,44 @@ function closePreviewModal() {
     // 重置图片翻页状态,避免下次打开非图片预览时旧 list/index 残留干扰
     _previewImageList = [];
     _previewImageIndex = -1;
+}
+
+/* PDF 预览：先用五字节 Range 请求预检（权限/文件头/大小），再交给 iframe 内
+ * 浏览器原生阅读器分段拉取（后续 Range 请求由 /api/preview?kind=pdf 响应）。 */
+async function _loadPreviewPdf({stage, contentEl, paperEl, loaderEl, title, src}) {
+    const controller = new AbortController();
+    _previewPdfController = controller;
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    stage.classList.add("preview-pdf-stage");
+    loaderEl.innerHTML = '<div class="preview-loader-text">正在加载 PDF…</div>';
+    loaderEl.hidden = false;
+    try {
+        // 先以五字节 Range 请求检查权限和文件类型，避免 iframe 把错误 JSON 当成文档。
+        const response = await fetch(src, {headers: {Range: "bytes=0-4"}, signal: controller.signal});
+        if (!response.ok) {
+            const result = await response.json().catch(() => ({}));
+            throw new Error(result.detail || result.error || `PDF 加载失败：HTTP ${response.status}`);
+        }
+        if (response.body) await response.body.cancel();
+        if (!document.getElementById("previewOverlay")) return;
+        const frame = document.createElement("iframe");
+        frame.className = "preview-pdf-frame";
+        frame.title = `${title} — PDF 预览`;
+        frame.src = `${src}#view=FitH`;
+        contentEl.appendChild(frame);
+        paperEl.hidden = false;
+    } catch (error) {
+        if (!document.getElementById("previewOverlay")) return;
+        const message = document.createElement("div");
+        message.className = "preview-message preview-error";
+        message.textContent = error.name === "AbortError" ? "PDF 加载超时，请重试或下载文件" : error.message;
+        contentEl.appendChild(message);
+        paperEl.hidden = false;
+    } finally {
+        clearTimeout(timeout);
+        if (_previewPdfController === controller) _previewPdfController = null;
+        loaderEl.hidden = true;
+    }
 }
 
 function _setPreviewZoom(z) {
@@ -2501,6 +2629,11 @@ function openPreviewModal({ title, kind, src, content, error, iconName, ext, ite
         return;
     }
 
+    if (kind === "pdf") {
+        _loadPreviewPdf({stage, contentEl, paperEl, loaderEl, title, src});
+        return;
+    }
+
     if (kind === "video" || kind === "audio") {
         // 走 Artplayer 流式播放：先把 paper 展开、loader 维持可见，等 Artplayer 实例化完成再隐藏。
         paperEl.hidden = false;
@@ -2652,7 +2785,25 @@ function _renderMdMathHtml(tok) {
  *   - md/markdown：默认渲染为 HTML（marked.js），切换按钮可在 渲染 ↔ 原文 之间切
  *   - 其它文本（含代码文件）：保持纯文本展示，不做语法高亮
  */
-function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
+/** 把 Markdown 里的相对/绝对图片引用改写为云盘预览接口地址。
+ *  外部 URL 和内嵌图片保留原值；调用方只处理 DOMPurify 消毒后的属性。 */
+function markdownImagePreviewUrl(reference, documentPath) {
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(reference)) return reference;
+    const imagePath = decodeURIComponent(reference.split(/[?#]/, 1)[0]);
+    const parts = imagePath.startsWith("/") ? [] : documentPath.split("/").slice(0, -1);
+    for (const part of imagePath.split("/")) {
+        if (!part || part === ".") continue;
+        if (part === "..") {
+            if (!parts.length) throw new Error("图片路径超出云盘根目录");
+            parts.pop();
+        } else {
+            parts.push(part);
+        }
+    }
+    return `${CONFIG.API_BASE}/api/preview?path=${encodeURIComponent(parts.join("/"))}&kind=image`;
+}
+
+function renderPreviewText(contentEl, raw, { ext, isMarkdown, documentPath = "" }) {
     contentEl.innerHTML = "";
 
     // ================ Markdown 分支 ================
@@ -2699,7 +2850,17 @@ function renderPreviewText(contentEl, raw, { ext, isMarkdown }) {
             contentEl.innerHTML = "";
             const wrap = document.createElement("div");
             wrap.className = "preview-md";
-            wrap.innerHTML = finalHtml;
+            // template 内容保持惰性，先改好图片 URL 再插入，避免请求站点下的错误路径。
+            const template = document.createElement("template");
+            template.innerHTML = finalHtml;
+            template.content.querySelectorAll("img[src]").forEach(image => {
+                try {
+                    image.setAttribute("src", markdownImagePreviewUrl(image.getAttribute("src"), documentPath));
+                } catch (_) {
+                    image.removeAttribute("src");
+                }
+            });
+            wrap.appendChild(template.content);
             contentEl.appendChild(wrap);
         };
 
@@ -2754,6 +2915,12 @@ async function previewFile(item, kind) {
     const url = `${CONFIG.API_BASE}/api/preview?path=${encodeURIComponent(relPath)}&kind=${kind}`;
     const ext = item.name.split(".").pop().toLowerCase();
 
+    if (kind === "pdf") {
+        // 原生阅读器 iframe：走 GET /api/preview?kind=pdf（支持 HTTP Range 分段拉取）。
+        openPreviewModal({title: item.name, kind, src: url, iconName: "pdf"});
+        return;
+    }
+
     if (kind === "image") {
         // 传 item 给 openPreviewModal,用于建立"同文件夹内前后图片翻页"状态
         openPreviewModal({ title: item.name, kind: "image", src: url, iconName: "image", item });
@@ -2799,7 +2966,7 @@ async function previewFile(item, kind) {
             if (paperEl) paperEl.hidden = false;
             return;
         }
-        renderPreviewText(contentEl, data.content || "", { ext, isMarkdown: ext === "md" || ext === "markdown" });
+        renderPreviewText(contentEl, data.content || "", { ext, isMarkdown: ext === "md" || ext === "markdown", documentPath: relPath });
         // fetch 返回后必须取消 paper 的 hidden,否则 paper 整层保持 display:none,
         if (loaderEl) loaderEl.hidden = true;
         if (paperEl) paperEl.hidden = false;
@@ -3028,6 +3195,7 @@ function renderPinnedSidebar() {
             <span class="pinned-item-name">${escapeHtml(pathLabel(p))}</span>
         </div>`;
     }).join("");
+    window.DriveDrag?.refreshTargets();
 }
 
 function goToPinned(path) {
@@ -3354,22 +3522,84 @@ const overlay = document.getElementById("dropOverlay");
 let _dragCounter = 0;
 function _showDropOverlay() { overlay.classList.add("active"); }
 function _hideDropOverlay() { overlay.classList.remove("active"); }
-
-["dragenter", "dragover", "dragleave", "drop"].forEach(eName => {
-    document.body.addEventListener(eName, e => { e.preventDefault(); e.stopPropagation(); }, false);
+// 仅响应来自操作系统/其它页面的文件拖拽；内部拖拽(文本选中等)不触发上传。
+function _isExternalFileDrag(event) {
+    return Array.from(event.dataTransfer?.types || []).includes("Files");
+}
+["dragenter", "dragover", "dragleave", "drop"].forEach(name => {
+    document.body.addEventListener(name, event => {
+        if (_isExternalFileDrag(event)) event.preventDefault();
+    });
 });
-dropZone.addEventListener("dragenter", () => { _dragCounter++; _showDropOverlay(); });
-dropZone.addEventListener("dragover",  () => { _showDropOverlay(); });
+dropZone.addEventListener("dragenter", event => {
+    if (!_isExternalFileDrag(event)) return;
+    _dragCounter++;
+    _showDropOverlay();
+});
+dropZone.addEventListener("dragover", event => {
+    if (!_isExternalFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    _showDropOverlay();
+});
 dropZone.addEventListener("dragleave", () => {
     _dragCounter = Math.max(0, _dragCounter - 1);
-    if (_dragCounter === 0) _hideDropOverlay();
+    if (!_dragCounter) _hideDropOverlay();
 });
-dropZone.addEventListener("drop", (e) => {
+dropZone.addEventListener("drop", event => {
     _dragCounter = 0;
     _hideDropOverlay();
-    const files = e.dataTransfer.files;
-    if (files.length) handleFilesUpload(files);
+    if (!_isExternalFileDrag(event)) return;
+    event.preventDefault();
+    // 在 drop 同步阶段取得条目及 File 快照，事件返回后拖拽数据仓库不再可读。
+    const files = Array.from(event.dataTransfer.files || []);
+    const items = Array.from(event.dataTransfer.items || []).filter(item => item.kind === "file").map(item => ({
+        entry: (item.getAsEntry || item.webkitGetAsEntry)?.call(item),
+        file: item.getAsFile(),
+    }));
+    handleDroppedUpload(items, files).catch(error => showAlert("上传失败", errMessage(error)));
 });
+
+/** 递归展开拖入的目录条目，返回 [{file, relativePath}] 列表。 */
+async function collectDroppedFiles(items) {
+    const files = [];
+    async function visit(entry, parent = "") {
+        const relativePath = joinPath(parent, entry.name);
+        if (entry.isFile) {
+            const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+            files.push({ file, relativePath });
+        } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            // Chromium 每次只返回一批条目，必须读到空批次才能保证目录完整。
+            while (true) {
+                const children = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+                if (!children.length) break;
+                for (const child of children) await visit(child, relativePath);
+            }
+        }
+    }
+    for (const item of items) {
+        if (item.entry) await visit(item.entry);
+        else if (item.file) files.push({ file: item.file, relativePath: item.file.name });
+    }
+    return files;
+}
+
+/** 拖放上传入口：含目录时递归收集后走文件夹上传，否则走普通多文件上传。 */
+async function handleDroppedUpload(items, fallbackFiles) {
+    if (currentView !== "files") {
+        switchToFilesView();
+        await loadPath("");
+    }
+    const targetPath = currentPath;
+    if (items.some(item => item.entry?.isDirectory)) {
+        const files = await collectDroppedFiles(items);
+        if (!files.length) { showToast("文件夹中没有可上传的文件"); return; }
+        await handleFolderUpload(files, targetPath);
+    } else {
+        await handleFilesUpload(fallbackFiles);
+    }
+}
 
 function triggerFileInput() {
     if(currentView !== "files") {
@@ -3380,8 +3610,12 @@ function triggerFileInput() {
 }
 
 function handleFileSelect(e) {
-    handleFilesUpload(e.target.files);
+    // 先把 FileList 快照成数组再清空 input：FileList 是活引用，
+    // e.target.value = "" 会立刻把它清空，异步的 handleFilesUpload
+    // 在首个 await 恢复后就拿不到任何文件（表现为一直"准备中"不开始上传）。
+    const files = Array.from(e.target.files || []);
     e.target.value = "";
+    handleFilesUpload(files);
 }
 
 // ================= 「新建」下拉菜单 =================
@@ -3472,6 +3706,12 @@ async function handleFolderSelect(e) {
         await loadPath("");  // 上传到根目录
     }
 
+    await handleFolderUpload(files.map(file => ({ file, relativePath: file.webkitRelativePath || file.name })), currentPath);
+}
+
+/** 批量上传一组带相对路径的文件到 targetPath 目录。拖拽文件夹与目录选择器共用。 */
+async function handleFolderUpload(files, targetPath) {
+
     const widget = document.getElementById("uploadWidget");
     widget.style.display = "block";
     widget.classList.remove("collapsed");
@@ -3486,9 +3726,7 @@ async function handleFolderSelect(e) {
 
     for (let i = 0; i < files.length; i++) {
         if (_uploadsCancelled) break;  // 用户点了"取消",剩余文件不再处理
-        const file = files[i];
-        // webkitRelativePath 形如 "myfolder/sub/a.txt"，保留完整目录结构
-        const relPath = file.webkitRelativePath || file.name;
+        const { file, relativePath: relPath } = files[i];
         const fileId = `up_${Date.now()}_${i}_${Math.floor(Math.random() * 1e6)}`;
         _pendingUploadTasks++;
 
@@ -3504,7 +3742,7 @@ async function handleFolderSelect(e) {
             }
             setUploadStatus(fileId, "正在计算 MD5...", 0);
             md5 = await calculateMD5(file);
-            await doUploadXHR(fileId, file, md5, relPath, "", overwriteAll === true);
+            await doUploadXHR(fileId, file, md5, relPath, "", overwriteAll === true, targetPath);
         } catch (err) {
             if (err && err.status === 409) {
                 // 服务器上已有同名文件:首次询问,之后按既定决策批量处理
@@ -3514,7 +3752,7 @@ async function handleFolderSelect(e) {
                 if (overwriteAll) {
                     // 覆盖:带显式 overwrite 重试一次
                     try {
-                        await doUploadXHR(fileId, file, md5, relPath, "", true);
+                        await doUploadXHR(fileId, file, md5, relPath, "", true, targetPath);
                     } catch (err2) {
                         setUploadStatus(fileId, "失败: " + errMessage(err2), 0, true);
                     }
@@ -3768,7 +4006,7 @@ function calculateMD5(file) {
     });
 }
 
-function doUploadXHR(id, file, md5, relativePath = "", resolvedName = "", overwrite = false) {
+function doUploadXHR(id, file, md5, relativePath = "", resolvedName = "", overwrite = false, targetPath = currentPath) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         currentXHRs[id] = xhr;
@@ -3806,7 +4044,7 @@ function doUploadXHR(id, file, md5, relativePath = "", resolvedName = "", overwr
             ? new File([file], resolvedName, { type: file.type, lastModified: file.lastModified })
             : file;
         fd.append("file", part);
-        fd.append("path", currentPath);
+        fd.append("path", targetPath);
         fd.append("client_md5", md5);
         if (relativePath) fd.append("relative_path", relativePath);
         if (overwrite) fd.append("overwrite", "1");
@@ -3920,6 +4158,10 @@ function iconNameForExt(isDir, ext) {
     if (["jpg","png","jpeg","gif","webp"].includes(ext)) return "image";
     if (["mp3","wav","flac","ogg","m4a","aac","wma","opus"].includes(ext)) return "audio";
     if (["mp4","mkv","mov","avi","webm","flv","wmv","m4v"].includes(ext)) return "video";
+    // Office 文档仅显示专属图标（不提供 Office 在线预览）。
+    if (["xls", "xlsx", "xlsm", "ods", "csv"].includes(ext)) return "excel";
+    if (["ppt", "pptx", "pptm", "odp"].includes(ext)) return "ppt";
+    if (["doc", "docx", "docm", "odt"].includes(ext)) return "word";
     if (ext === "pdf") return "pdf";
     if (["md","markdown"].includes(ext)) return "md";
     if (_CODE_EXTS.has(ext)) return "code";
@@ -3964,11 +4206,14 @@ const _PREVIEW_VIDEO_EXTS = new Set([
 const _PREVIEW_AUDIO_EXTS = new Set([
     "mp3","wav","ogg","oga","m4a","aac","opus",
 ]);
+// PDF 用浏览器原生阅读器预览（GET /api/preview?kind=pdf，支持 HTTP Range）。
+const _PREVIEW_PDF_EXTS = new Set(["pdf"]);
 function canPreview(item, ext) {
     if (!item || item.is_dir) return null;
     if (_PREVIEW_IMAGE_EXTS.has(ext)) return "image";
     if (_PREVIEW_VIDEO_EXTS.has(ext)) return "video";
     if (_PREVIEW_AUDIO_EXTS.has(ext)) return "audio";
+    if (_PREVIEW_PDF_EXTS.has(ext)) return "pdf";
     if (_PREVIEW_TEXT_EXTS.has(ext)) return "text";
     return null;
 }
@@ -4017,6 +4262,7 @@ function updateBreadcrumb() {
         });
     }
     bc.innerHTML = html;
+    window.DriveDrag?.refreshTargets();
     // DOM 渲染后检测溢出并截断;用 rAF 保证拿到正确的 scrollWidth
     requestAnimationFrame(() => truncateBreadcrumb());
 }
@@ -4421,6 +4667,7 @@ function rebuildDisplayedItems() {
 }
 
 function handleSearch() {
+    if (window.DriveDrag?.isBusy()) { document.getElementById("searchInput").value = searchQuery; return; }
     const raw = document.getElementById("searchInput").value.trim();
     searchQuery = raw;
     renderTableBody();

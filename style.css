@@ -237,12 +237,13 @@ body.resizing {
     transition: opacity 0.18s ease;
 }
 
-/* 选中状态下，top-bar 的内容（路径/搜索/大头针）渐隐，让位给 selection-bar */
+/* 选中状态下，top-bar 的内容（路径/搜索/大头针）渐隐，让位给 selection-bar。
+   鼠标拖拽条目时例外：隐藏操作条、恢复地址栏，便于拖到面包屑/侧边栏目标。 */
 .top-bar > .explorer-toolbar {
     transition: opacity 0.18s ease;
 }
 
-body.has-selection .top-bar > .explorer-toolbar {
+body.has-selection:not(.drive-dragging) .top-bar > .explorer-toolbar {
     opacity: 0;
     pointer-events: none;
 }
@@ -586,6 +587,18 @@ body.is-mobile .bc-ellipsis-dropdown-item {
 .selection-bar.active {
     opacity: 1;
     pointer-events: auto;
+}
+
+/* 鼠标拖拽条目时：隐藏多选操作条，恢复显示地址栏（路径/搜索），便于拖拽定位。 */
+body.drive-dragging .selection-bar {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: none;
+}
+
+body.drive-dragging .top-bar > .explorer-toolbar {
+    transition: none;
 }
 
 /* 左边容器 */
@@ -2289,4 +2302,87 @@ body.is-mobile .drop-overlay svg {
 }
 body.is-mobile .mobile-action-sheet-cancel:active {
     background: #e0e2e6;
+}
+
+/* ================= 鼠标拖拽条目（drive_drag.js） ================= */
+.drive-drag-card {
+    box-sizing: border-box;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 280px;
+    max-width: calc(100vw - 8px);
+    height: 60px;
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border-radius: 16px;
+    background: #fff;
+    color: #202124;
+    box-shadow: 0 3px 6px rgba(60, 64, 67, .3), 0 1px 12px rgba(60, 64, 67, .16);
+    z-index: 12000;
+    pointer-events: none;
+    user-select: none;
+    will-change: transform;
+    --file-icon-size: 20px;
+}
+.drive-drag-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 16px;
+}
+.drive-drag-badge {
+    min-width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    padding: 0 6px;
+    background: #1a73e8;
+    color: #fff;
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.drive-drag-blocked { color: #5f6368; font-size: 22px; }
+.drive-drag-card [hidden] { display: none !important; }
+body.drive-dragging, body.drive-dragging * { cursor: grabbing !important; }
+body.drive-dragging .data-tooltip { visibility: hidden; }
+.file-table tr.drive-drag-source { background: #d2e3f3 !important; }
+.drive-drag-source .file-name-cell { opacity: .55; }
+.drive-drop-target {
+    background: #d2e3fc !important;
+    box-shadow: inset 0 0 0 2px #1a73e8;
+    border-radius: 8px;
+}
+#navTrash.drive-drop-target { background: #fce8e6 !important; box-shadow: inset 0 0 0 2px #d93025; }
+body.drive-drag-submitting .file-list { cursor: progress; }
+
+/* ================= PDF 原生阅读器预览 ================= */
+.preview-stage.preview-pdf-stage {
+    padding: 12px;
+    overflow: hidden;
+}
+.preview-pdf-stage .preview-paper {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    transform: none;
+    background: #323639;
+}
+.preview-pdf-stage .preview-content {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+.preview-pdf-frame {
+    display: block;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    border: 0;
+    background: #fff;
 }

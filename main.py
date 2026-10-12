@@ -60,6 +60,7 @@ DIRECT_DOWNLOAD_TTL = int(os.getenv("DIRECT_DOWNLOAD_TTL", "60"))      # 60 秒
 FOLDER_DOWNLOAD_LIMIT = int(os.getenv("FOLDER_DOWNLOAD_LIMIT", str(200 * 1024 * 1024)))  # 200MB
 TEXT_PREVIEW_LIMIT = int(os.getenv("TEXT_PREVIEW_LIMIT", str(2 * 1024 * 1024)))         # 2MB
 IMAGE_PREVIEW_LIMIT = int(os.getenv("IMAGE_PREVIEW_LIMIT", str(50 * 1024 * 1024)))       # 50MB
+PDF_PREVIEW_LIMIT = int(os.getenv("PDF_PREVIEW_LIMIT", str(100 * 1024 * 1024)))          # 100MB
 # 视频/音频预览上限:足够覆盖常见视频;超出后前端拿到 413 让用户改用下载。
 MEDIA_PREVIEW_LIMIT = int(os.getenv("MEDIA_PREVIEW_LIMIT", str(500 * 1024 * 1024)))      # 500MB
 BINARY_SNIFF_BYTES = 8 * 1024
@@ -469,8 +470,13 @@ async def add_security_headers(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     # 文件下载/预览多数为 inline,可加 Referrer-Policy 减少跨站泄露
     response.headers.setdefault("Referrer-Policy", "no-referrer")
-    # 防点击劫持:页面不允许被嵌入任何 iframe
-    response.headers.setdefault("X-Frame-Options", "DENY")
+    # 防点击劫持:页面不允许被嵌入任何 iframe。
+    # 例外:仅成功的 PDF 预览响应允许云盘同源 iframe 嵌入(原生阅读器),其余继续拒绝。
+    pdf_preview = (request.url.path == "/api/preview"
+                   and request.query_params.get("kind") == "pdf"
+                   and response.status_code in (200, 206)
+                   and response.headers.get("Content-Type", "").split(";", 1)[0] == "application/pdf")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN" if pdf_preview else "DENY")
     # CSP:脚本只允许同源(前端第三方库已本地托管到 /vendor/)。
     # index.html 内有内联脚本、DOM 中大量使用内联事件处理器与内联 style,
     # 因此 script/style 需要 'unsafe-inline' -- 即便如此,script-src 仍会
@@ -486,7 +492,7 @@ async def add_security_headers(request: Request, call_next):
         "font-src 'self'; "
         "object-src 'none'; "
         "base-uri 'self'; "
-        "frame-ancestors 'none'",
+        + ("frame-ancestors 'self'" if pdf_preview else "frame-ancestors 'none'"),
     )
     return response
 
@@ -580,6 +586,14 @@ def serve_script():
     if script_path.exists():
         return FileResponse(script_path, media_type="application/javascript")
     return JSONResponse(status_code=404, content={"error": "未找到 script.js"})
+
+
+@app.get("/drive_drag.js")
+def serve_drive_drag():
+    script_path = _BASE_DIR / "drive_drag.js"
+    if script_path.exists():
+        return FileResponse(script_path, media_type="application/javascript")
+    return JSONResponse(status_code=404, content={"error": "未找到 drive_drag.js"})
 
 
 # ================= 图标按需加载 API =================
@@ -1278,10 +1292,11 @@ def preview_file(path: str = "", kind: str = "image", request: Request = None):
     - kind=video / audio : 流式返回音视频字节(FileResponse);Starlette 自动处理
       HTTP Range,前端可拖动进度条分段拉取。
     - kind=text  : 返回 JSON { content, size, truncated }。超过 2 MB → 413;含 NUL → 415。
+    - kind=pdf : 校验扩展名与文件头后，以 application/pdf 内联返回，支持 HTTP Range。
     """
     _require_rate(_rate_list, request)
-    if kind not in ("image", "text", "video", "audio"):
-        raise HTTPException(400, "kind 必须为 image / text / video / audio")
+    if kind not in ("image", "text", "video", "audio", "pdf"):
+        raise HTTPException(400, "kind 必须为 image / text / video / audio / pdf")
     target = get_safe_path(path)
     if not target.exists():
         raise HTTPException(404, "文件不存在")
@@ -1291,6 +1306,23 @@ def preview_file(path: str = "", kind: str = "image", request: Request = None):
         raise HTTPException(400, "不支持预览符号链接")
     ext = target.suffix.lstrip(".").lower()
     size = target.stat().st_size
+    if kind == "pdf":
+        if ext != "pdf":
+            raise HTTPException(415, "只能使用 PDF 预览打开 .pdf 文件")
+        if size > PDF_PREVIEW_LIMIT:
+            raise HTTPException(413, f"PDF 文件过大(>{PDF_PREVIEW_LIMIT // 1024 // 1024}MB),请改用下载")
+        # 文件头嗅探：拦截改名成 .pdf 的其它文件。
+        try:
+            with target.open("rb") as file:
+                if not file.read(5) == b"%PDF-":
+                    raise HTTPException(415, "文件不是有效的 PDF,请检查文件内容")
+        except PermissionError:
+            raise HTTPException(403, "权限不足")
+        except OSError:
+            raise HTTPException(500, "读取 PDF 失败")
+        return FileResponse(target, media_type="application/pdf", filename=target.name,
+                            content_disposition_type="inline",
+                            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
     if kind == "image":
         if ext not in _IMAGE_MIME:
             raise HTTPException(400, f"不支持的图片格式:{ext or '(无扩展名)'}")
